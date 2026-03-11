@@ -19,9 +19,18 @@ metadata:
       config:
         - '~/.tg-cli/config.json'
     install:
-      - kind: go
-        package: github.com/privateclaw-com/tg-cli@latest
+      - kind: shell
         bins: [tg-cli]
+        run: |
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) ARCH=amd64 ;;
+            arm64|aarch64) ARCH=arm64 ;;
+          esac
+          URL="https://github.com/privateclaw-com/tg-cli/releases/latest/download/tg-cli-${OS}-${ARCH}"
+          curl -fsSL "$URL" -o /usr/local/bin/tg-cli
+          chmod +x /usr/local/bin/tg-cli
 ---
 
 # tg-cli — Agentic Telegram CLI
