@@ -191,11 +191,15 @@ func cmdDialogs(c config, onlyUnread bool, limit int) error {
 	})
 }
 
-func cmdRead(c config, name string, offsetID int) error {
+func cmdRead(c config, name string, offsetID int, since time.Time) error {
 	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, name)
 		if err != nil {
 			return err
+		}
+
+		if !since.IsZero() {
+			return readSince(ctx, api, p, since)
 		}
 
 		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
@@ -226,6 +230,122 @@ func cmdRead(c config, name string, offsetID int) error {
 		return printJSON(map[string]any{
 			"messages": formatted,
 			"offset":   offset,
+		})
+	})
+}
+
+// readSince fetches all messages newer than the cutoff time (paginating as needed).
+func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Time) error {
+	cutoff := int(since.Unix())
+	var all []tgMsg
+	offsetID := 0
+
+	for {
+		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:     p.InputPeer(),
+			Limit:    100,
+			OffsetID: offsetID,
+		})
+		if err != nil {
+			return err
+		}
+		msgs, chats, users, err := extractHistoryMessages(result)
+		if err != nil {
+			return err
+		}
+		if len(msgs) == 0 {
+			break
+		}
+
+		em := buildEntityMaps(users, chats)
+		done := false
+		for _, m := range msgs {
+			msg, ok := m.(*tg.Message)
+			if !ok {
+				continue
+			}
+			if msg.Date < cutoff {
+				done = true
+				break
+			}
+			if msg.Message == "" {
+				continue
+			}
+			sender := ""
+			if msg.FromID != nil {
+				sender = em.senderName(msg.FromID)
+			}
+			all = append(all, tgMsg{
+				ID:   msg.ID,
+				Who:  sender,
+				When: time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
+				Text: msg.Message,
+			})
+			if offsetID == 0 || msg.ID < offsetID {
+				offsetID = msg.ID
+			}
+		}
+		if done || len(msgs) < 100 {
+			break
+		}
+	}
+
+	// Reverse to chronological order (getHistory returns newest first)
+	for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
+		all[i], all[j] = all[j], all[i]
+	}
+
+	return printJSON(map[string]any{
+		"messages": all,
+		"total":    len(all),
+		"since":    since.UTC().Format(time.RFC3339),
+	})
+}
+
+func cmdReply(c config, name string, msgID int, text string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		_, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     p.InputPeer(),
+			Message:  text,
+			RandomID: cryptoRandInt63(),
+			ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: msgID},
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Reply sent")
+		return nil
+	})
+}
+
+func cmdSearchAll(c config, query string, limit int) error {
+	if limit <= 0 {
+		limit = 50
+	}
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		result, err := api.MessagesSearchGlobal(ctx, &tg.MessagesSearchGlobalRequest{
+			Q:          query,
+			Filter:     &tg.InputMessagesFilterEmpty{},
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      limit,
+		})
+		if err != nil {
+			return err
+		}
+		msgs, chats, users, err := extractHistoryMessages(result)
+		if err != nil {
+			return err
+		}
+		em := buildEntityMaps(users, chats)
+		formatted := formatMessages(msgs, em)
+		return printJSON(map[string]any{
+			"results": formatted,
+			"total":   len(formatted),
+			"query":   query,
 		})
 	})
 }

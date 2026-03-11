@@ -9,7 +9,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const helpText = `tg-cli — Telegram CLI (standalone, no external binaries)
@@ -36,15 +38,17 @@ Auth (interactive, single step):
 
 Telegram:
   me                                     Account info
-  dialogs [--unread] [--limit <n>]      List dialogs (default: all, paginates automatically)
-  read <name> [--offset <n>]            Read messages from dialog
-  export <name> [--limit <n>]           Export full history (stdout JSON)
-  send <name> <text...>                 Send message
-  mark-read <name>                      Mark dialog as read
-  search-groups <query> [--limit <n>]   Search public groups/channels
-  join <target>                          Join group/channel (username or t.me link)
-  leave <name>                           Leave group/channel (channel, supergroup, or group)
-  search <dialog> <query> [--limit <n>]  Search messages in dialog
+  dialogs [--unread] [--limit <n>]                    List dialogs (default: all)
+  read <name> [--offset <n>] [--since <duration>]     Read messages (--since 1h, 30m, 7d)
+  export <name> [--limit <n>]                         Export full history (stdout JSON)
+  send <name> <text...>                               Send message
+  reply <name> <message-id> <text...>                 Reply to a specific message
+  mark-read <name>                                    Mark dialog as read
+  search <dialog> <query> [--limit <n>]               Search messages in dialog
+  search-all <query> [--limit <n>]                    Search messages across all chats
+  search-groups <query> [--limit <n>]                 Search public groups/channels
+  join <target>                                       Join group/channel (username or t.me link)
+  leave <name>                                        Leave group/channel
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
@@ -163,10 +167,19 @@ func main() {
 	case "read":
 		pos := positional(args)
 		if len(pos) == 0 {
-			fatalf("usage: tg-cli read <name> [--offset <n>]")
+			fatalf("usage: tg-cli read <name> [--offset <n>] [--since <duration>]")
 		}
-		offset, _ := flagInt(args, "--offset", 0)
-		if err := cmdRead(c, pos[0], offset); err != nil {
+		offset, args2 := flagInt(args, "--offset", 0)
+		sinceStr, _ := flagStr(args2, "--since")
+		var since time.Time
+		if sinceStr != "" {
+			var err error
+			since, err = parseSince(sinceStr)
+			if err != nil {
+				fatalf("%v", err)
+			}
+		}
+		if err := cmdRead(c, pos[0], offset, since); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -213,6 +226,29 @@ func main() {
 			fatalf("usage: tg-cli leave <name>")
 		}
 		if err := cmdLeave(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "reply":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli reply <name> <message-id> <text...>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdReply(c, pos[0], msgID, strings.Join(pos[2:], " ")); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "search-all":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli search-all <query> [--limit <n>]")
+		}
+		limit, _ := flagInt(args, "--limit", 50)
+		if err := cmdSearchAll(c, strings.Join(pos, " "), limit); err != nil {
 			fatalf("%v", err)
 		}
 

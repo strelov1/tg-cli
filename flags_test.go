@@ -160,6 +160,51 @@ func TestExtractGlobalFlags_invalidTimeout(t *testing.T) {
 	}
 }
 
+// ── parseSince ──
+
+func TestParseSince_hours(t *testing.T) {
+	cutoff, err := parseSince("2h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff := time.Since(cutoff)
+	if diff < 1*time.Hour || diff > 3*time.Hour {
+		t.Errorf("expected ~2h ago, got diff=%v", diff)
+	}
+}
+
+func TestParseSince_minutes(t *testing.T) {
+	cutoff, err := parseSince("30m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff := time.Since(cutoff)
+	if diff < 25*time.Minute || diff > 35*time.Minute {
+		t.Errorf("expected ~30m ago, got diff=%v", diff)
+	}
+}
+
+func TestParseSince_days(t *testing.T) {
+	cutoff, err := parseSince("7d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff := time.Since(cutoff)
+	if diff < 6*24*time.Hour || diff > 8*24*time.Hour {
+		t.Errorf("expected ~7d ago, got diff=%v", diff)
+	}
+}
+
+func TestParseSince_invalid(t *testing.T) {
+	cases := []string{"bad", "0d", "-1h", ""}
+	for _, s := range cases {
+		_, err := parseSince(s)
+		if err == nil {
+			t.Errorf("parseSince(%q) expected error, got nil", s)
+		}
+	}
+}
+
 func TestExtractGlobalFlags_noGlobals(t *testing.T) {
 	acc, timeout, rem := extractGlobalFlags([]string{"dialogs", "--unread"})
 	if acc != "" || timeout != 0 {

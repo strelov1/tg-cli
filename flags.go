@@ -67,6 +67,24 @@ func positional(args []string) []string {
 
 // extractGlobalFlags strips --account/-a and --timeout from args,
 // returning them separately along with the remaining args.
+// parseSince converts a human duration string ("1h", "30m", "7d") to a time.Time cutoff.
+// Supports Go duration formats plus "d" suffix for days.
+func parseSince(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n <= 0 {
+			return time.Time{}, fmt.Errorf("invalid duration %q: use e.g. 7d", s)
+		}
+		return time.Now().Add(-time.Duration(n) * 24 * time.Hour), nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return time.Time{}, fmt.Errorf("invalid duration %q: use formats like 1h, 30m, 7d", s)
+	}
+	return time.Now().Add(-d), nil
+}
+
 func extractGlobalFlags(args []string) (account string, timeout time.Duration, remaining []string) {
 	for i := 0; i < len(args); i++ {
 		switch {
