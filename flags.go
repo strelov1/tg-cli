@@ -85,6 +85,24 @@ func parseSince(s string) (time.Time, error) {
 	return time.Now().Add(-d), nil
 }
 
+// parseDuration converts a human duration string ("1h", "30m", "7d") to time.Duration.
+// Supports Go duration formats plus "d" suffix for days.
+func parseDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid duration %q: use e.g. 7d", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid duration %q: use formats like 1h, 30m, 7d", s)
+	}
+	return d, nil
+}
+
 func extractGlobalFlags(args []string) (account string, timeout time.Duration, remaining []string) {
 	for i := 0; i < len(args); i++ {
 		switch {

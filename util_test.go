@@ -382,3 +382,397 @@ func TestListAccounts_notExist(t *testing.T) {
 		t.Errorf("expected 0 for missing dir, got %d", len(phones))
 	}
 }
+
+// ── reactionEmoji ──
+
+func TestReactionEmoji_emoji(t *testing.T) {
+	got := reactionEmoji(&tg.ReactionEmoji{Emoticon: "👍"})
+	if got != "👍" {
+		t.Errorf("got %q, want 👍", got)
+	}
+}
+
+func TestReactionEmoji_customEmoji(t *testing.T) {
+	got := reactionEmoji(&tg.ReactionCustomEmoji{DocumentID: 12345})
+	if got != "custom:12345" {
+		t.Errorf("got %q, want custom:12345", got)
+	}
+}
+
+func TestReactionEmoji_empty(t *testing.T) {
+	got := reactionEmoji(&tg.ReactionEmpty{})
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestReactionEmoji_nil(t *testing.T) {
+	got := reactionEmoji(nil)
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// ── msgReplyTo ──
+
+func TestMsgReplyTo_present(t *testing.T) {
+	msg := &tg.Message{
+		ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 42},
+	}
+	if got := msgReplyTo(msg); got != 42 {
+		t.Errorf("got %d, want 42", got)
+	}
+}
+
+func TestMsgReplyTo_nil(t *testing.T) {
+	msg := &tg.Message{}
+	if got := msgReplyTo(msg); got != 0 {
+		t.Errorf("got %d, want 0", got)
+	}
+}
+
+func TestMsgReplyTo_storyHeader(t *testing.T) {
+	// MessageReplyStoryHeader should yield 0 (not a message reply)
+	msg := &tg.Message{
+		ReplyTo: &tg.MessageReplyStoryHeader{},
+	}
+	if got := msgReplyTo(msg); got != 0 {
+		t.Errorf("got %d, want 0 for story header", got)
+	}
+}
+
+// ── msgReactions ──
+
+func TestMsgReactions_nil(t *testing.T) {
+	msg := &tg.Message{}
+	if got := msgReactions(msg); got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+// ── formatMessages with metadata ──
+
+func TestFormatMessages_withViews(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+	msg := &tg.Message{ID: 1, Date: 1000, Message: "hi"}
+	msg.SetViews(999)
+	out := formatMessages([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].Views != 999 {
+		t.Errorf("Views: got %d, want 999", out[0].Views)
+	}
+}
+
+func TestFormatMessages_withForwards(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+	msg := &tg.Message{ID: 1, Date: 1000, Message: "hi"}
+	msg.SetForwards(42)
+	out := formatMessages([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].Forwards != 42 {
+		t.Errorf("Forwards: got %d, want 42", out[0].Forwards)
+	}
+}
+
+func TestFormatMessages_withReplyTo(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+	msg := &tg.Message{
+		ID:      5,
+		Date:    1000,
+		Message: "reply",
+		ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 3},
+	}
+	out := formatMessages([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].ReplyTo != 3 {
+		t.Errorf("ReplyTo: got %d, want 3", out[0].ReplyTo)
+	}
+}
+
+func TestFormatMessages_withPostAuthor(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+	msg := &tg.Message{ID: 1, Date: 1000, Message: "post"}
+	msg.SetPostAuthor("Alice")
+	out := formatMessages([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].PostAuthor != "Alice" {
+		t.Errorf("PostAuthor: got %q, want Alice", out[0].PostAuthor)
+	}
+}
+
+// ── formatMessagesFull with metadata ──
+
+func TestFormatMessagesFull_withViews(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+	msg := &tg.Message{ID: 1, Date: 1000, Message: "hi"}
+	msg.SetViews(77)
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].Views != 77 {
+		t.Errorf("Views: got %d, want 77", out[0].Views)
+	}
+}
+
+// ── mediaTypeName ──
+
+func TestMediaTypeName_photo(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaPhoto{}); got != "photo" {
+		t.Errorf("got %q, want photo", got)
+	}
+}
+
+func TestMediaTypeName_document(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaDocument{}); got != "document" {
+		t.Errorf("got %q, want document", got)
+	}
+}
+
+func TestMediaTypeName_geo(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaGeo{}); got != "geo" {
+		t.Errorf("got %q, want geo", got)
+	}
+}
+
+func TestMediaTypeName_contact(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaContact{}); got != "contact" {
+		t.Errorf("got %q, want contact", got)
+	}
+}
+
+func TestMediaTypeName_poll(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaPoll{}); got != "poll" {
+		t.Errorf("got %q, want poll", got)
+	}
+}
+
+func TestMediaTypeName_webpage(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaWebPage{}); got != "webpage" {
+		t.Errorf("got %q, want webpage", got)
+	}
+}
+
+func TestMediaTypeName_dice(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaDice{}); got != "dice" {
+		t.Errorf("got %q, want dice", got)
+	}
+}
+
+func TestMediaTypeName_venue(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaVenue{}); got != "venue" {
+		t.Errorf("got %q, want venue", got)
+	}
+}
+
+func TestMediaTypeName_geoLive(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaGeoLive{}); got != "geo_live" {
+		t.Errorf("got %q, want geo_live", got)
+	}
+}
+
+func TestMediaTypeName_story(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaStory{}); got != "story" {
+		t.Errorf("got %q, want story", got)
+	}
+}
+
+func TestMediaTypeName_empty(t *testing.T) {
+	if got := mediaTypeName(&tg.MessageMediaEmpty{}); got != "" {
+		t.Errorf("got %q, want empty string", got)
+	}
+}
+
+func TestMediaTypeName_nil(t *testing.T) {
+	if got := mediaTypeName(nil); got != "" {
+		t.Errorf("got %q, want empty string", got)
+	}
+}
+
+// ── extFromMIME ──
+
+func TestExtFromMIME_knownTypes(t *testing.T) {
+	cases := []struct {
+		mime string
+		want string
+	}{
+		{"image/jpeg", ".jpg"},
+		{"image/png", ".png"},
+		{"image/gif", ".gif"},
+		{"image/webp", ".webp"},
+		{"video/mp4", ".mp4"},
+		{"video/quicktime", ".mov"},
+		{"audio/mpeg", ".mp3"},
+		{"audio/ogg", ".ogg"},
+		{"audio/wav", ".wav"},
+		{"application/pdf", ".pdf"},
+		{"application/zip", ".zip"},
+		{"application/x-tgsticker", ".tgs"},
+	}
+	for _, tc := range cases {
+		got := extFromMIME(tc.mime)
+		if got != tc.want {
+			t.Errorf("extFromMIME(%q) = %q, want %q", tc.mime, got, tc.want)
+		}
+	}
+}
+
+func TestExtFromMIME_unknown(t *testing.T) {
+	// Unknown MIME types should not panic; may return empty or stdlib ext
+	got := extFromMIME("application/x-totally-unknown-format-xyz")
+	_ = got // just verify no panic
+}
+
+func TestExtFromMIME_empty(t *testing.T) {
+	got := extFromMIME("")
+	_ = got // empty MIME → empty ext, no panic
+}
+
+// ── formatMessagesFull ──
+
+func TestFormatMessagesFull_textOnly(t *testing.T) {
+	user := &tg.User{ID: 1, FirstName: "Alice"}
+	em := buildEntityMaps([]tg.UserClass{user}, nil)
+
+	msg := &tg.Message{
+		ID:      10,
+		FromID:  &tg.PeerUser{UserID: 1},
+		Date:    1_000_000,
+		Message: "hello",
+	}
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].ID != 10 {
+		t.Errorf("ID: got %d, want 10", out[0].ID)
+	}
+	if out[0].Who != "Alice" {
+		t.Errorf("Who: got %q, want Alice", out[0].Who)
+	}
+	if out[0].Text != "hello" {
+		t.Errorf("Text: got %q, want hello", out[0].Text)
+	}
+	if out[0].MediaType != "" {
+		t.Errorf("MediaType should be empty, got %q", out[0].MediaType)
+	}
+	if _, err := time.Parse(time.RFC3339, out[0].When); err != nil {
+		t.Errorf("When is not RFC3339: %q", out[0].When)
+	}
+}
+
+func TestFormatMessagesFull_mediaOnly(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	// Photo message with no text — formatMessagesFull should NOT skip it
+	msg := &tg.Message{
+		ID:      20,
+		Date:    2_000_000,
+		Message: "",
+		Media:   &tg.MessageMediaPhoto{},
+	}
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 (media-only), got %d", len(out))
+	}
+	if out[0].MediaType != "photo" {
+		t.Errorf("MediaType: got %q, want photo", out[0].MediaType)
+	}
+	if out[0].Text != "" {
+		t.Errorf("Text should be empty, got %q", out[0].Text)
+	}
+}
+
+func TestFormatMessagesFull_textAndMedia(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	msg := &tg.Message{
+		ID:      30,
+		Date:    3_000_000,
+		Message: "caption",
+		Media:   &tg.MessageMediaDocument{},
+	}
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].Text != "caption" {
+		t.Errorf("Text: got %q, want caption", out[0].Text)
+	}
+	if out[0].MediaType != "document" {
+		t.Errorf("MediaType: got %q, want document", out[0].MediaType)
+	}
+}
+
+func TestFormatMessagesFull_skipsEmptyAndNoMedia(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	// Message with no text and no media should be skipped
+	msg := &tg.Message{ID: 1, Date: 1000, Message: ""}
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 0 {
+		t.Errorf("expected 0, got %d", len(out))
+	}
+}
+
+func TestFormatMessagesFull_skipsZeroID(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	// ID=0 messages (e.g. NotModified placeholders) should be skipped
+	msg := &tg.Message{ID: 0, Date: 1000, Message: "should skip"}
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 0 {
+		t.Errorf("expected 0 for ID=0 message, got %d", len(out))
+	}
+}
+
+func TestFormatMessagesFull_skipsNonMessage(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	svc := &tg.MessageService{ID: 5}
+	out := formatMessagesFull([]tg.MessageClass{svc}, em)
+	if len(out) != 0 {
+		t.Errorf("expected 0 for MessageService, got %d", len(out))
+	}
+}
+
+func TestFormatMessagesFull_noFromID(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	// Channel-sent messages have no FromID
+	msg := &tg.Message{ID: 99, Date: 5000, Message: "broadcast", FromID: nil}
+	out := formatMessagesFull([]tg.MessageClass{msg}, em)
+	if len(out) != 1 {
+		t.Fatalf("expected 1, got %d", len(out))
+	}
+	if out[0].Who != "" {
+		t.Errorf("Who should be empty for nil FromID, got %q", out[0].Who)
+	}
+}
+
+func TestFormatMessagesFull_multipleMessages(t *testing.T) {
+	em := buildEntityMaps(nil, nil)
+
+	msgs := []tg.MessageClass{
+		&tg.Message{ID: 1, Date: 1000, Message: "first"},
+		&tg.Message{ID: 2, Date: 2000, Message: "", Media: &tg.MessageMediaPhoto{}},
+		&tg.Message{ID: 3, Date: 3000, Message: ""},               // no media, skipped
+		&tg.MessageService{ID: 4},                                   // service, skipped
+		&tg.Message{ID: 5, Date: 5000, Message: "last"},
+	}
+	out := formatMessagesFull(msgs, em)
+	if len(out) != 3 {
+		t.Fatalf("expected 3, got %d", len(out))
+	}
+	if out[0].ID != 1 || out[1].ID != 2 || out[2].ID != 5 {
+		t.Errorf("unexpected IDs: %v", []int{out[0].ID, out[1].ID, out[2].ID})
+	}
+}

@@ -4,14 +4,18 @@ description: >
   Manage the user's personal Telegram account directly from the command line.
   Use when the user asks to: read Telegram messages or chats, list dialogs or unread messages,
   send a message or file as themselves on Telegram, reply to or edit a specific message,
-  delete messages, add reactions, forward messages between chats, search messages inside
-  a chat or across all chats, join or leave a group or channel, export full chat history,
-  mark messages as read, search for public Telegram groups, get info about a chat or user,
-  list group members, or watch a dialog for new messages in real time.
+  delete messages, add reactions, get reactions on a message, forward messages between chats,
+  copy-forward without attribution, search messages inside a chat or across all chats,
+  join or leave a group or channel, export full chat history, mark messages as read,
+  search for public Telegram groups, get info about a chat or user, list group members
+  or admins, list forum topics, get or create an invite link, invite a user into a group,
+  find common chats with a user, get a user's profile photos, download media from a message,
+  pin or unpin a message, mute or unmute a chat, scan a message ID range, get a specific
+  message by ID, or watch a dialog for new messages in real time.
   This is for the user's personal account (MTProto, not a bot).
   Two-step agent-friendly auth: call auth-request, get the code from the user, then call
-  auth-complete — no interactive TTY needed.
-version: 1.2.0
+  auth-complete — no interactive TTY needed. QR auth also available via auth-qr.
+version: 1.3.0
 metadata:
   openclaw:
     emoji: '✈️'
@@ -89,9 +93,11 @@ If no authorized accounts — start auth (see **Authorization** below).
 
 ---
 
-## Authorization (Two Steps, No stdin)
+## Authorization
 
-### Step 1 — Request code
+### Two-step (phone + code)
+
+#### Step 1 — Request code
 
 ```bash
 tg-cli auth-request +12025551234
@@ -101,7 +107,7 @@ Returns `{"status":"code_sent","phone":"+12025551234"}`. A verification code is 
 
 Tell the user: **"Check your Telegram — I've sent a code. Please share it with me."**
 
-### Step 2 — Complete auth
+#### Step 2 — Complete auth
 
 ```bash
 # Without 2FA
@@ -114,6 +120,14 @@ tg-cli auth-complete +12025551234 --code 12345 --password MySecret2FA
 Returns `{"status":"authorized","phone":"...","username":"..."}`.
 
 If the user has 2FA enabled and you didn't pass `--password`, re-run with it.
+
+### QR code (scan from existing device)
+
+```bash
+tg-cli auth-qr
+```
+
+Displays a QR code in the terminal. The user opens Telegram on their phone: Settings → Devices → Link Desktop Device, then scans the QR. Once scanned, the session is saved automatically.
 
 ---
 
@@ -166,10 +180,25 @@ tg-cli read team-chat --since 7d      # messages from last 7 days
 
 Output:
 ```json
-{"messages": [{"id": 1, "who": "Alice", "when": "2024-01-01T10:00:00Z", "text": "Hello"}], "offset": 1}
+{"messages": [{"id": 1, "who": "Alice", "when": "2024-01-01T10:00:00Z", "text": "Hello", "views": 100, "forwards": 2, "reply_to": 0, "reactions": [{"emoji": "👍", "count": 5}]}], "offset": 1}
 ```
 
 Use `offset` value from response as `--offset` to load older messages.
+
+### Get a specific message by ID
+
+```bash
+tg-cli get-message team-chat 12345
+tg-cli get-message @channel 99
+```
+
+### Scan a range of message IDs
+
+Fetches all messages (including media-only) in the given ID range. Useful for gap analysis in channels.
+
+```bash
+tg-cli scan team-chat 100 200
+```
 
 ### Send message
 
@@ -208,11 +237,30 @@ tg-cli react team-chat 12345 👍
 tg-cli react @alice 99 ❤️
 ```
 
+### Get reactions on a message
+
+```bash
+tg-cli reactions team-chat 12345
+```
+
+Output:
+```json
+{"reactions": [{"emoji": "👍", "count": 10}, {"emoji": "❤️", "count": 3}]}
+```
+
 ### Forward a message
 
 ```bash
 tg-cli forward team-chat 12345 @alice
 tg-cli forward inbox 99 project-chat
+```
+
+### Copy-forward without attribution
+
+Sends the message content without the "Forwarded from" header.
+
+```bash
+tg-cli forward-copy team-chat 12345 @alice
 ```
 
 ### Send a file
@@ -222,11 +270,36 @@ tg-cli send-file @alice /path/to/report.pdf
 tg-cli send-file team-chat ./screenshot.png
 ```
 
+### Download media from a message
+
+```bash
+tg-cli download-media team-chat 12345
+tg-cli download-media team-chat 12345 --out /tmp/file.jpg
+```
+
 ### Mark as read
 
 ```bash
 tg-cli mark-read team-chat
 ```
+
+### Pin / unpin a message
+
+```bash
+tg-cli pin team-chat 12345
+tg-cli unpin team-chat 12345
+```
+
+### Mute / unmute notifications
+
+```bash
+tg-cli mute team-chat 1h       # mute for 1 hour
+tg-cli mute team-chat 7d       # mute for 7 days
+tg-cli mute team-chat forever  # mute indefinitely
+tg-cli unmute team-chat
+```
+
+Duration formats: `30m`, `1h`, `7d`, `forever`.
 
 ### Search messages in a dialog
 
@@ -258,11 +331,6 @@ tg-cli info team-chat
 tg-cli info @golang_digest
 ```
 
-Output for a channel:
-```json
-{"type": "supergroup", "id": 123, "title": "Team Chat", "username": "teamchat", "members": 42, "description": "..."}
-```
-
 ### List group members
 
 ```bash
@@ -270,9 +338,54 @@ tg-cli members team-chat
 tg-cli members @golang_digest --limit 50
 ```
 
+### List group admins
+
+```bash
+tg-cli admins team-chat
+```
+
 Output:
 ```json
-{"members": [{"id": 1, "username": "alice", "first_name": "Alice"}], "total": 1}
+{"admins": [{"id": 1, "username": "alice", "first_name": "Alice", "role": "creator"}]}
+```
+
+### List forum topics
+
+```bash
+tg-cli topics team-chat
+```
+
+### Get invite link
+
+```bash
+tg-cli invite-link team-chat
+```
+
+Output:
+```json
+{"link": "https://t.me/+AbCdEfGhIjK"}
+```
+
+### Invite a user into a group
+
+```bash
+tg-cli invite team-chat @alice
+tg-cli invite team-chat +12025551234
+```
+
+Works for both regular groups and supergroups.
+
+### Common chats with a user
+
+```bash
+tg-cli common-chats @alice
+```
+
+### User's profile photos
+
+```bash
+tg-cli user-photos @alice
+tg-cli user-photos @alice --limit 5
 ```
 
 ### Watch for new messages
@@ -288,11 +401,6 @@ Prints each new message as a JSON object to stdout as it arrives. Runs until Ctr
 
 ```bash
 tg-cli search-groups "golang" --limit 10
-```
-
-Output:
-```json
-{"results": [{"id": 1, "title": "Golang", "username": "golang", "type": "supergroup", "members": 50000}], "total": 1}
 ```
 
 ### Join a group or channel
@@ -312,8 +420,6 @@ tg-cli leave golang_digest
 tg-cli leave team-chat
 ```
 
-Works for channels, supergroups, and regular groups.
-
 ### Export full chat history
 
 ```bash
@@ -331,7 +437,7 @@ Progress is printed to stderr. Output:
   "dialog": "team-chat",
   "total_messages": 1234,
   "incomplete": false,
-  "messages": [{"id": 1, "who": "Alice", "when": "...", "text": "..."}]
+  "messages": [{"id": 1, "who": "Alice", "when": "...", "text": "...", "views": 100, "forwards": 2}]
 }
 ```
 

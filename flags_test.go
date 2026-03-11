@@ -214,3 +214,82 @@ func TestExtractGlobalFlags_noGlobals(t *testing.T) {
 		t.Errorf("unexpected remaining: %v", rem)
 	}
 }
+
+// ── parseDuration ──
+
+func TestParseDuration_hours(t *testing.T) {
+	d, err := parseDuration("2h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != 2*time.Hour {
+		t.Errorf("expected 2h, got %v", d)
+	}
+}
+
+func TestParseDuration_minutes(t *testing.T) {
+	d, err := parseDuration("30m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != 30*time.Minute {
+		t.Errorf("expected 30m, got %v", d)
+	}
+}
+
+func TestParseDuration_days(t *testing.T) {
+	d, err := parseDuration("7d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != 7*24*time.Hour {
+		t.Errorf("expected 7*24h, got %v", d)
+	}
+}
+
+func TestParseDuration_oneDayEdge(t *testing.T) {
+	d, err := parseDuration("1d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != 24*time.Hour {
+		t.Errorf("expected 24h, got %v", d)
+	}
+}
+
+func TestParseDuration_seconds(t *testing.T) {
+	d, err := parseDuration("90s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != 90*time.Second {
+		t.Errorf("expected 90s, got %v", d)
+	}
+}
+
+func TestParseDuration_invalid(t *testing.T) {
+	cases := []string{"bad", "0d", "-1h", "", "0m", "0s"}
+	for _, s := range cases {
+		_, err := parseDuration(s)
+		if err == nil {
+			t.Errorf("parseDuration(%q) expected error, got nil", s)
+		}
+	}
+}
+
+func TestParseDuration_zeroDays(t *testing.T) {
+	_, err := parseDuration("0d")
+	if err == nil {
+		t.Error("parseDuration(0d) expected error")
+	}
+}
+
+func TestParseDuration_whitespace(t *testing.T) {
+	d, err := parseDuration("  1h  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != time.Hour {
+		t.Errorf("expected 1h, got %v", d)
+	}
+}

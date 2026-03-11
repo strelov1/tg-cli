@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"rsc.io/qr"
 )
 
 // ── Pending auth state ──
@@ -215,6 +217,167 @@ func cmdAuth(c config, args []string) error {
 		}
 		return nil
 	})
+}
+
+// cmdAuthQR authorizes via QR code (no phone number needed).
+// The user scans the QR with their Telegram app: Settings → Devices → Link Desktop Device.
+func cmdAuthQR(c config) error {
+	// Use a temporary account slot; session will be moved after auth.
+	const qrSlot = "_qr_pending"
+	c.account = qrSlot
+
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		appID, err := c.appIDInt()
+		if err != nil {
+			return err
+		}
+
+		// Export initial QR login token.
+		result, err := api.AuthExportLoginToken(ctx, &tg.AuthExportLoginTokenRequest{
+			APIID:     appID,
+			APIHash:   c.apiHash,
+			ExceptIDs: []int64{},
+		})
+		if err != nil {
+			return fmt.Errorf("export token: %w", err)
+		}
+
+		switch r := result.(type) {
+		case *tg.AuthLoginToken:
+			tokenB64 := base64.RawURLEncoding.EncodeToString(r.Token)
+			qrURL := "tg://login?token=" + tokenB64
+			expiry := time.Unix(int64(r.Expires), 0)
+
+			fmt.Fprintln(os.Stderr, "Open Telegram → Settings → Devices → Link Desktop Device and scan:")
+			fmt.Fprintln(os.Stderr)
+			printTerminalQR(qrURL)
+			fmt.Fprintf(os.Stderr, "\nExpires at %s. Waiting...\n", expiry.Format("15:04:05"))
+
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ticker.C:
+					if time.Now().After(expiry) {
+						return fmt.Errorf("QR code expired — run auth-qr again")
+					}
+					polled, err := api.AuthExportLoginToken(ctx, &tg.AuthExportLoginTokenRequest{
+						APIID:     appID,
+						APIHash:   c.apiHash,
+						ExceptIDs: []int64{},
+					})
+					if err != nil {
+						if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+							return fmt.Errorf("2FA is enabled — QR login with 2FA not supported yet; use: tg-cli auth <phone> --password <2fa>")
+						}
+						fmt.Fprintf(os.Stderr, "poll: %v\n", err)
+						continue
+					}
+					switch pr := polled.(type) {
+					case *tg.AuthLoginToken:
+						expiry = time.Unix(int64(pr.Expires), 0)
+					case *tg.AuthLoginTokenSuccess:
+						return finishQRAuth(c, pr, qrSlot)
+					case *tg.AuthLoginTokenMigrateTo:
+						return fmt.Errorf("DC migration to DC %d required — not supported", pr.DCID)
+					}
+				}
+			}
+
+		case *tg.AuthLoginTokenSuccess:
+			return finishQRAuth(c, r, qrSlot)
+
+		case *tg.AuthLoginTokenMigrateTo:
+			return fmt.Errorf("DC migration to DC %d required — not supported", r.DCID)
+		}
+		return nil
+	})
+}
+
+// finishQRAuth extracts user info from a successful QR login and relocates the session.
+func finishQRAuth(c config, success *tg.AuthLoginTokenSuccess, qrSlot string) error {
+	authAuth, ok := success.Authorization.(*tg.AuthAuthorization)
+	if !ok {
+		return fmt.Errorf("unexpected authorization type: %T", success.Authorization)
+	}
+	u, ok := authAuth.User.(*tg.User)
+	if !ok {
+		return fmt.Errorf("unexpected user type: %T", authAuth.User)
+	}
+
+	phone := u.Phone
+	if phone != "" && !strings.HasPrefix(phone, "+") {
+		phone = "+" + phone
+	}
+	if phone == "" || phone == "+" {
+		phone = fmt.Sprintf("id_%d", u.ID)
+	}
+
+	// Move session from _qr_pending to proper account dir.
+	oldDir := c.accountDir()
+	newC := c
+	newC.account = phone
+	newDir := newC.accountDir()
+
+	if oldDir != newDir {
+		if err := os.MkdirAll(newDir, 0700); err == nil {
+			oldSess := filepath.Join(oldDir, "session.json")
+			newSess := filepath.Join(newDir, "session.json")
+			if err := os.Rename(oldSess, newSess); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not move session to %s: %v\n", newSess, err)
+			} else {
+				os.Remove(oldDir)
+			}
+		}
+	}
+
+	fc := readFileConfig()
+	if fc.DefaultAccount == "" {
+		fc.DefaultAccount = phone
+		if err := writeFileConfig(fc); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not set default account: %v\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "Set as default account")
+		}
+	}
+
+	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	fmt.Fprintf(os.Stderr, "Authorized via QR: %s (%s)\n", name, phone)
+
+	return printJSON(map[string]any{
+		"status":     "authorized",
+		"id":         u.ID,
+		"phone":      u.Phone,
+		"username":   u.Username,
+		"first_name": u.FirstName,
+		"last_name":  u.LastName,
+	})
+}
+
+// printTerminalQR renders a QR code for the given text as Unicode block characters to stderr.
+// Each module is represented by two characters to keep the QR roughly square.
+// Works best on dark-background terminals; if scanning fails, use the raw URL.
+func printTerminalQR(text string) {
+	code, err := qr.Encode(text, qr.L)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "QR URL: %s\n", text)
+		return
+	}
+	size := code.Size
+	border := 2
+	for y := -border; y < size+border; y++ {
+		for x := -border; x < size+border; x++ {
+			if x >= 0 && y >= 0 && x < size && y < size && code.Black(x, y) {
+				fmt.Fprint(os.Stderr, "██")
+			} else {
+				fmt.Fprint(os.Stderr, "  ")
+			}
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	fmt.Fprintf(os.Stderr, "If scanning fails, open this URL:\n%s\n", text)
 }
 
 func cmdStatus(c config) error {

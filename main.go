@@ -32,8 +32,9 @@ Auth (agent-friendly, two steps):
   auth-request <phone>                   Step 1: send code to phone (non-blocking)
   auth-complete <phone> --code <code> [--password <2fa>]  Step 2: finish auth
 
-Auth (interactive, single step):
+Auth (interactive):
   auth <phone> [--password <2fa>]        Authorize an account (reads code from stdin)
+  auth-qr                                Authorize by scanning a QR code (no phone needed)
   status                                 Check session status
 
 Telegram:
@@ -48,15 +49,31 @@ Telegram:
   delete <name> <message-id> [<id>...]                Delete message(s)
   react <name> <message-id> <emoji>                   Add reaction to a message
   forward <from> <message-id> <to>                    Forward message to another dialog
+  forward-copy <from> <message-id> <to>               Copy message without "Forwarded from" label
   mark-read <name>                                    Mark dialog as read
+  reactions <name> <message-id>                       Get reaction counts on a message
   search <dialog> <query> [--limit <n>]               Search messages in dialog
   search-all <query> [--limit <n>]                    Search messages across all chats
   search-groups <query> [--limit <n>]                 Search public groups/channels
   join <target>                                       Join group/channel (username or t.me link)
   leave <name>                                        Leave group/channel
+  invite <group> <user>                               Invite user or bot to a group/channel
   info <name>                                         Get info about a user, group, or channel
   members <name> [--limit <n>]                        List members of a group or channel
+  admins <name>                                       List admins with their permissions
+  topics <name>                                       List forum topics in a supergroup
+  invite-link <name>                                  Generate an invite link (requires admin)
   watch <name> [--interval <seconds>]                 Watch for new messages (default: 5s poll)
+  get-message <name> <id> [<id>...]                   Fetch specific messages by ID
+  scan <name> --from <id> --to <id>                   Scan a message ID range (IDscan)
+  pin <name> <message-id> [--silent]                  Pin a message
+  unpin <name> <message-id>                           Unpin a message
+  mute <name> [--duration <d>]                        Mute notifications (1h, 30m, 7d; default: permanent)
+  unmute <name>                                       Unmute notifications
+  download-media <name> <message-id> <dir>            Download media from a message to a directory
+  user-photos <name> [--save-to <dir>]                List (and optionally download) user profile photos
+  common-chats <user>                                 Find common groups/channels with a user
+  create-group <title> [<user>...]                    Create a new group with optional initial members
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
@@ -152,6 +169,11 @@ func main() {
 
 	case "auth":
 		if err := cmdAuth(c, args); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "auth-qr":
+		if err := cmdAuthQR(c); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -306,6 +328,32 @@ func main() {
 			fatalf("%v", err)
 		}
 
+	case "forward-copy":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli forward-copy <from> <message-id> <to>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdForwardCopy(c, pos[0], msgID, pos[2]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "reactions":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli reactions <name> <message-id>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdReactions(c, pos[0], msgID); err != nil {
+			fatalf("%v", err)
+		}
+
 	case "send-file":
 		pos := positional(args)
 		if len(pos) < 2 {
@@ -371,6 +419,169 @@ func main() {
 		}
 		limit, _ := flagInt(args, "--limit", 0)
 		if err := cmdExport(c, pos[0], limit); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "admins":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli admins <name>")
+		}
+		if err := cmdAdmins(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "get-message":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli get-message <name> <id> [<id>...]")
+		}
+		var msgIDs []int
+		for _, s := range pos[1:] {
+			id, err := strconv.Atoi(s)
+			if err != nil {
+				fatalf("invalid message ID %q: must be a number", s)
+			}
+			msgIDs = append(msgIDs, id)
+		}
+		if err := cmdGetMessage(c, pos[0], msgIDs); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "scan":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli scan <name> --from <id> --to <id>")
+		}
+		fromID, _ := flagInt(args, "--from", 0)
+		toID, _ := flagInt(args, "--to", 0)
+		if fromID <= 0 || toID <= 0 || fromID > toID {
+			fatalf("--from and --to must be positive integers with --from <= --to")
+		}
+		if err := cmdScan(c, pos[0], fromID, toID); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "common-chats":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli common-chats <user>")
+		}
+		if err := cmdCommonChats(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "user-photos":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli user-photos <user> [--save-to <dir>]")
+		}
+		saveDir, _ := flagStr(args, "--save-to")
+		if err := cmdUserPhotos(c, pos[0], saveDir); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "download-media":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli download-media <name> <message-id> <dir>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdDownloadMedia(c, pos[0], msgID, pos[2]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "pin":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli pin <name> <message-id> [--silent]")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		silent, _ := flagBool(args, "--silent")
+		if err := cmdPin(c, pos[0], msgID, silent); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "unpin":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli unpin <name> <message-id>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdUnpin(c, pos[0], msgID); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "mute":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli mute <name> [--duration <d>]")
+		}
+		var dur time.Duration
+		if dStr, _ := flagStr(args, "--duration"); dStr != "" {
+			var err error
+			dur, err = parseDuration(dStr)
+			if err != nil {
+				fatalf("%v", err)
+			}
+		}
+		if err := cmdMute(c, pos[0], dur); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "unmute":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli unmute <name>")
+		}
+		if err := cmdUnmute(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "topics":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli topics <name>")
+		}
+		if err := cmdTopics(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "invite-link":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli invite-link <name>")
+		}
+		if err := cmdInviteLink(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "invite":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli invite <group> <user>")
+		}
+		if err := cmdInvite(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "create-group":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli create-group <title> [<user>...]")
+		}
+		title := pos[0]
+		members := pos[1:]
+		if err := cmdCreateGroup(c, title, members); err != nil {
 			fatalf("%v", err)
 		}
 

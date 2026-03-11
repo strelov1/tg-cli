@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,12 +131,143 @@ func extractHistoryMessages(r tg.MessagesMessagesClass) ([]tg.MessageClass, []tg
 	}
 }
 
+// reactionInfo is a single emoji reaction with its count.
+type reactionInfo struct {
+	Emoji string `json:"emoji"`
+	Count int    `json:"count"`
+}
+
+// reactionEmoji extracts a string label from a ReactionClass.
+func reactionEmoji(r tg.ReactionClass) string {
+	switch re := r.(type) {
+	case *tg.ReactionEmoji:
+		return re.Emoticon
+	case *tg.ReactionCustomEmoji:
+		return fmt.Sprintf("custom:%d", re.DocumentID)
+	default:
+		return ""
+	}
+}
+
 // tgMsg is the JSON-serializable representation of a single Telegram message.
 type tgMsg struct {
-	ID   int    `json:"id"`
-	Who  string `json:"who"`
-	When string `json:"when"`
-	Text string `json:"text"`
+	ID         int            `json:"id"`
+	Who        string         `json:"who"`
+	When       string         `json:"when"`
+	Text       string         `json:"text"`
+	Views      int            `json:"views,omitempty"`
+	Forwards   int            `json:"forwards,omitempty"`
+	ReplyTo    int            `json:"reply_to,omitempty"`
+	PostAuthor string         `json:"post_author,omitempty"`
+	Reactions  []reactionInfo `json:"reactions,omitempty"`
+}
+
+// tgMsgFull is a richer message representation that includes media info and metadata.
+type tgMsgFull struct {
+	ID         int            `json:"id"`
+	Who        string         `json:"who,omitempty"`
+	When       string         `json:"when"`
+	Text       string         `json:"text,omitempty"`
+	MediaType  string         `json:"media_type,omitempty"`
+	Views      int            `json:"views,omitempty"`
+	Forwards   int            `json:"forwards,omitempty"`
+	ReplyTo    int            `json:"reply_to,omitempty"`
+	PostAuthor string         `json:"post_author,omitempty"`
+	Reactions  []reactionInfo `json:"reactions,omitempty"`
+}
+
+// formatMessagesFull formats all messages (including media-only), with media type and metadata.
+func formatMessagesFull(msgs []tg.MessageClass, em entityMaps) []tgMsgFull {
+	var out []tgMsgFull
+	for _, m := range msgs {
+		msg, ok := m.(*tg.Message)
+		if !ok || msg.ID == 0 {
+			continue
+		}
+		item := tgMsgFull{
+			ID:   msg.ID,
+			When: time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
+			Text: msg.Message,
+		}
+		if msg.FromID != nil {
+			item.Who = em.senderName(msg.FromID)
+		}
+		if msg.Media != nil {
+			item.MediaType = mediaTypeName(msg.Media)
+		}
+		if item.Text == "" && item.MediaType == "" {
+			continue
+		}
+		if v, ok := msg.GetViews(); ok {
+			item.Views = v
+		}
+		if f, ok := msg.GetForwards(); ok {
+			item.Forwards = f
+		}
+		if pa, ok := msg.GetPostAuthor(); ok {
+			item.PostAuthor = pa
+		}
+		item.ReplyTo = msgReplyTo(msg)
+		item.Reactions = msgReactions(msg)
+		out = append(out, item)
+	}
+	return out
+}
+
+// mediaTypeName returns a short label for a Telegram media type.
+func mediaTypeName(m tg.MessageMediaClass) string {
+	switch m.(type) {
+	case *tg.MessageMediaPhoto:
+		return "photo"
+	case *tg.MessageMediaDocument:
+		return "document"
+	case *tg.MessageMediaGeo:
+		return "geo"
+	case *tg.MessageMediaContact:
+		return "contact"
+	case *tg.MessageMediaPoll:
+		return "poll"
+	case *tg.MessageMediaWebPage:
+		return "webpage"
+	case *tg.MessageMediaDice:
+		return "dice"
+	case *tg.MessageMediaVenue:
+		return "venue"
+	case *tg.MessageMediaGeoLive:
+		return "geo_live"
+	case *tg.MessageMediaStory:
+		return "story"
+	case *tg.MessageMediaEmpty, nil:
+		return ""
+	default:
+		return "other"
+	}
+}
+
+// msgReactions extracts reaction info from a tg.Message.
+func msgReactions(msg *tg.Message) []reactionInfo {
+	reactions, ok := msg.GetReactions()
+	if !ok {
+		return nil
+	}
+	var out []reactionInfo
+	for _, r := range reactions.Results {
+		if e := reactionEmoji(r.Reaction); e != "" {
+			out = append(out, reactionInfo{Emoji: e, Count: r.Count})
+		}
+	}
+	return out
+}
+
+// msgReplyTo extracts the reply-to message ID from a tg.Message.
+func msgReplyTo(msg *tg.Message) int {
+	if msg.ReplyTo == nil {
+		return 0
+	}
+	if rh, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
+		return rh.ReplyToMsgID
+	}
+	return 0
 }
 
 func formatMessages(msgs []tg.MessageClass, em entityMaps) []tgMsg {
@@ -153,19 +285,32 @@ func formatMessages(msgs []tg.MessageClass, em entityMaps) []tgMsg {
 		if msg.FromID != nil {
 			sender = em.senderName(msg.FromID)
 		}
-		out = append(out, tgMsg{
+		item := tgMsg{
 			ID:   msg.ID,
 			Who:  sender,
 			When: time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
 			Text: text,
-		})
+		}
+		if v, ok := msg.GetViews(); ok {
+			item.Views = v
+		}
+		if f, ok := msg.GetForwards(); ok {
+			item.Forwards = f
+		}
+		if pa, ok := msg.GetPostAuthor(); ok {
+			item.PostAuthor = pa
+		}
+		item.ReplyTo = msgReplyTo(msg)
+		item.Reactions = msgReactions(msg)
+		out = append(out, item)
 	}
 	return out
 }
 
 // ── Peer resolution ──
 
-// resolvePeer resolves a username, phone number, or t.me URL to a Telegram peer.
+// resolvePeer resolves a username, phone number, t.me URL, or numeric ID to a Telegram peer.
+// Numeric IDs are tried first as regular chat (group), then as channel/user.
 func resolvePeer(ctx context.Context, pm *peers.Manager, name string) (peers.Peer, error) {
 	// Strip https://t.me/<username> → <username> for non-invite links
 	query := name
@@ -175,6 +320,17 @@ func resolvePeer(ctx context.Context, pm *peers.Manager, name string) (peers.Pee
 	if !strings.HasPrefix(query, "https://") && !strings.HasPrefix(query, "t.me/") {
 		query = strings.TrimPrefix(query, "@")
 	}
+
+	// If it looks like a bare numeric ID, try resolving as a regular chat first.
+	if id, err := strconv.ParseInt(query, 10, 64); err == nil {
+		if chat, err := pm.GetChat(ctx, id); err == nil {
+			return chat, nil
+		}
+		if chat, err := pm.ResolveChatID(ctx, id); err == nil {
+			return chat, nil
+		}
+	}
+
 	p, err := pm.Resolve(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("cannot find %q: %w", name, err)

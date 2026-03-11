@@ -6,10 +6,12 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
@@ -909,6 +911,887 @@ func cmdWatch(c config, name string, intervalSecs int) error {
 	})
 }
 
+// inputMediaFromMessage converts a received MessageMediaClass to InputMediaClass for re-sending.
+// Returns (nil, false) for unsupported media types.
+func inputMediaFromMessage(media tg.MessageMediaClass) (tg.InputMediaClass, bool) {
+	switch m := media.(type) {
+	case *tg.MessageMediaPhoto:
+		photo, ok := m.Photo.(*tg.Photo)
+		if !ok {
+			return nil, false
+		}
+		return &tg.InputMediaPhoto{
+			ID: &tg.InputPhoto{
+				ID:            photo.ID,
+				AccessHash:    photo.AccessHash,
+				FileReference: photo.FileReference,
+			},
+			Spoiler: m.Spoiler,
+		}, true
+	case *tg.MessageMediaDocument:
+		doc, ok := m.Document.(*tg.Document)
+		if !ok {
+			return nil, false
+		}
+		return &tg.InputMediaDocument{
+			ID: &tg.InputDocument{
+				ID:            doc.ID,
+				AccessHash:    doc.AccessHash,
+				FileReference: doc.FileReference,
+			},
+			Spoiler: m.Spoiler,
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+// cmdForwardCopy copies a message to another dialog without the "Forwarded from" attribution.
+func cmdForwardCopy(c config, fromName string, msgID int, toName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		from, err := resolvePeer(ctx, pm, fromName)
+		if err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		to, err := resolvePeer(ctx, pm, toName)
+		if err != nil {
+			return fmt.Errorf("destination: %w", err)
+		}
+
+		ids := []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}}
+		var result tg.MessagesMessagesClass
+		if ch, ok := from.(peers.Channel); ok {
+			result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: ch.InputChannel(),
+				ID:      ids,
+			})
+		} else {
+			result, err = api.MessagesGetMessages(ctx, ids)
+		}
+		if err != nil {
+			return err
+		}
+
+		msgs, _, _, _ := extractHistoryMessages(result)
+		var msg *tg.Message
+		for _, m := range msgs {
+			if mm, ok := m.(*tg.Message); ok && mm.ID == msgID {
+				msg = mm
+				break
+			}
+		}
+		if msg == nil {
+			return fmt.Errorf("message %d not found", msgID)
+		}
+
+		if msg.Media != nil {
+			if inputMedia, ok := inputMediaFromMessage(msg.Media); ok {
+				_, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+					Peer:     to.InputPeer(),
+					Media:    inputMedia,
+					Message:  msg.Message,
+					RandomID: cryptoRandInt63(),
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(os.Stderr, "Message copied (with media)")
+				return nil
+			}
+			// Unsupported media — fall through to text-only if available
+		}
+
+		if msg.Message == "" {
+			return fmt.Errorf("message %d has no copyable content (unsupported media type)", msgID)
+		}
+		_, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     to.InputPeer(),
+			Message:  msg.Message,
+			RandomID: cryptoRandInt63(),
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Message copied")
+		return nil
+	})
+}
+
+// cmdReactions reads the reaction counts on a specific message.
+func cmdReactions(c config, name string, msgID int) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+
+		ids := []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}}
+		var result tg.MessagesMessagesClass
+		if ch, ok := p.(peers.Channel); ok {
+			result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: ch.InputChannel(),
+				ID:      ids,
+			})
+		} else {
+			result, err = api.MessagesGetMessages(ctx, ids)
+		}
+		if err != nil {
+			return err
+		}
+
+		msgs, _, _, _ := extractHistoryMessages(result)
+		var msg *tg.Message
+		for _, m := range msgs {
+			if mm, ok := m.(*tg.Message); ok && mm.ID == msgID {
+				msg = mm
+				break
+			}
+		}
+		if msg == nil {
+			return fmt.Errorf("message %d not found", msgID)
+		}
+
+		reactions := msgReactions(msg)
+		return printJSON(map[string]any{
+			"message_id": msgID,
+			"reactions":  reactions,
+			"total":      len(reactions),
+		})
+	})
+}
+
+// cmdAdmins lists administrators of a group or channel with their permissions.
+func cmdAdmins(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+
+		type adminInfo struct {
+			ID         int64           `json:"id"`
+			Username   string          `json:"username,omitempty"`
+			FirstName  string          `json:"first_name,omitempty"`
+			LastName   string          `json:"last_name,omitempty"`
+			Role       string          `json:"role"`
+			CustomTitle string         `json:"custom_title,omitempty"`
+			Rights     map[string]bool `json:"rights,omitempty"`
+		}
+
+		usersMap := make(map[int64]*tg.User)
+		var out []adminInfo
+
+		switch peer := p.(type) {
+		case peers.Channel:
+			result, err := api.ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
+				Channel: peer.InputChannel(),
+				Filter:  &tg.ChannelParticipantsAdmins{},
+				Offset:  0,
+				Limit:   200,
+			})
+			if err != nil {
+				return err
+			}
+			v, ok := result.(*tg.ChannelsChannelParticipants)
+			if !ok {
+				return fmt.Errorf("unexpected result type: %T", result)
+			}
+			for _, u := range v.Users {
+				if usr, ok := u.(*tg.User); ok {
+					usersMap[usr.ID] = usr
+				}
+			}
+			for _, part := range v.Participants {
+				info := adminInfo{}
+				var rights *tg.ChatAdminRights
+				switch pt := part.(type) {
+				case *tg.ChannelParticipantCreator:
+					info.ID = pt.UserID
+					info.Role = "creator"
+					if rank, ok := pt.GetRank(); ok {
+						info.CustomTitle = rank
+					}
+					rights = &pt.AdminRights
+				case *tg.ChannelParticipantAdmin:
+					info.ID = pt.UserID
+					info.Role = "admin"
+					if rank, ok := pt.GetRank(); ok {
+						info.CustomTitle = rank
+					}
+					rights = &pt.AdminRights
+				default:
+					continue
+				}
+				if u, ok := usersMap[info.ID]; ok {
+					info.Username = u.Username
+					info.FirstName = u.FirstName
+					info.LastName = u.LastName
+				}
+				if rights != nil {
+					info.Rights = map[string]bool{
+						"change_info":     rights.ChangeInfo,
+						"post_messages":   rights.PostMessages,
+						"edit_messages":   rights.EditMessages,
+						"delete_messages": rights.DeleteMessages,
+						"ban_users":       rights.BanUsers,
+						"invite_users":    rights.InviteUsers,
+						"pin_messages":    rights.PinMessages,
+						"add_admins":      rights.AddAdmins,
+						"anonymous":       rights.Anonymous,
+						"manage_call":     rights.ManageCall,
+						"manage_topics":   rights.ManageTopics,
+					}
+				}
+				out = append(out, info)
+			}
+
+		case peers.Chat:
+			full, err := api.MessagesGetFullChat(ctx, peer.Raw().ID)
+			if err != nil {
+				return err
+			}
+			for _, u := range full.Users {
+				if usr, ok := u.(*tg.User); ok {
+					usersMap[usr.ID] = usr
+				}
+			}
+			if fc, ok := full.FullChat.(*tg.ChatFull); ok {
+				if parts, ok := fc.Participants.(*tg.ChatParticipants); ok {
+					for _, part := range parts.Participants {
+						var userID int64
+						role := ""
+						switch pt := part.(type) {
+						case *tg.ChatParticipantCreator:
+							userID = pt.UserID
+							role = "creator"
+						case *tg.ChatParticipantAdmin:
+							userID = pt.UserID
+							role = "admin"
+						default:
+							continue
+						}
+						info := adminInfo{ID: userID, Role: role}
+						if u, ok := usersMap[userID]; ok {
+							info.Username = u.Username
+							info.FirstName = u.FirstName
+							info.LastName = u.LastName
+						}
+						out = append(out, info)
+					}
+				}
+			}
+
+		default:
+			return fmt.Errorf("%s is not a group or channel", name)
+		}
+
+		return printJSON(map[string]any{"admins": out, "total": len(out)})
+	})
+}
+
+// cmdGetMessage fetches one or more messages by ID.
+func cmdGetMessage(c config, name string, msgIDs []int) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+
+		ids := make([]tg.InputMessageClass, len(msgIDs))
+		for i, id := range msgIDs {
+			ids[i] = &tg.InputMessageID{ID: id}
+		}
+
+		var result tg.MessagesMessagesClass
+		if ch, ok := p.(peers.Channel); ok {
+			result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: ch.InputChannel(),
+				ID:      ids,
+			})
+		} else {
+			result, err = api.MessagesGetMessages(ctx, ids)
+		}
+		if err != nil {
+			return err
+		}
+
+		msgs, chats, users, err := extractHistoryMessages(result)
+		if err != nil {
+			return err
+		}
+		em := buildEntityMaps(users, chats)
+		return printJSON(formatMessagesFull(msgs, em))
+	})
+}
+
+// cmdScan iterates message IDs in [fromID, toID] in batches of 100 and returns all found messages.
+func cmdScan(c config, name string, fromID, toID int) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		ch, isChannel := p.(peers.Channel)
+
+		var all []tgMsgFull
+		for start := fromID; start <= toID; start += 100 {
+			end := start + 99
+			if end > toID {
+				end = toID
+			}
+			var ids []tg.InputMessageClass
+			for id := start; id <= end; id++ {
+				ids = append(ids, &tg.InputMessageID{ID: id})
+			}
+
+			var result tg.MessagesMessagesClass
+			if isChannel {
+				result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+					Channel: ch.InputChannel(),
+					ID:      ids,
+				})
+			} else {
+				result, err = api.MessagesGetMessages(ctx, ids)
+			}
+			if err != nil {
+				return fmt.Errorf("batch %d-%d: %w", start, end, err)
+			}
+			msgs, chats, users, err := extractHistoryMessages(result)
+			if err != nil {
+				return err
+			}
+			em := buildEntityMaps(users, chats)
+			batch := formatMessagesFull(msgs, em)
+			all = append(all, batch...)
+			fmt.Fprintf(os.Stderr, "  scanned %d-%d: %d messages\n", start, end, len(batch))
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		return printJSON(map[string]any{
+			"from_id":  fromID,
+			"to_id":    toID,
+			"total":    len(all),
+			"messages": all,
+		})
+	})
+}
+
+// cmdCommonChats returns chats shared between the current user and another user.
+func cmdCommonChats(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		u, ok := p.(peers.User)
+		if !ok {
+			return fmt.Errorf("%s is not a user", name)
+		}
+		raw := u.Raw()
+		inputUser := &tg.InputUser{UserID: raw.ID, AccessHash: raw.AccessHash}
+
+		result, err := api.MessagesGetCommonChats(ctx, &tg.MessagesGetCommonChatsRequest{
+			UserID: inputUser,
+			MaxID:  0,
+			Limit:  100,
+		})
+		if err != nil {
+			return err
+		}
+
+		type chatInfo struct {
+			ID      int64  `json:"id"`
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Members int    `json:"members,omitempty"`
+		}
+
+		var chats []tg.ChatClass
+		switch v := result.(type) {
+		case *tg.MessagesChats:
+			chats = v.Chats
+		case *tg.MessagesChatsSlice:
+			chats = v.Chats
+		}
+
+		var out []chatInfo
+		for _, chat := range chats {
+			switch c := chat.(type) {
+			case *tg.Chat:
+				out = append(out, chatInfo{ID: c.ID, Title: c.Title, Type: "group", Members: c.ParticipantsCount})
+			case *tg.Channel:
+				t := "supergroup"
+				if c.Broadcast {
+					t = "channel"
+				}
+				out = append(out, chatInfo{ID: c.ID, Title: c.Title, Type: t, Members: c.ParticipantsCount})
+			}
+		}
+
+		return printJSON(map[string]any{"common_chats": out, "total": len(out)})
+	})
+}
+
+// cmdUserPhotos lists (and optionally downloads) a user's profile photos.
+func cmdUserPhotos(c config, name, saveDir string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		u, ok := p.(peers.User)
+		if !ok {
+			return fmt.Errorf("%s is not a user", name)
+		}
+		raw := u.Raw()
+		inputUser := &tg.InputUser{UserID: raw.ID, AccessHash: raw.AccessHash}
+
+		result, err := api.PhotosGetUserPhotos(ctx, &tg.PhotosGetUserPhotosRequest{
+			UserID: inputUser,
+			Offset: 0,
+			MaxID:  0,
+			Limit:  100,
+		})
+		if err != nil {
+			return err
+		}
+
+		var photos []tg.PhotoClass
+		switch v := result.(type) {
+		case *tg.PhotosPhotos:
+			photos = v.Photos
+		case *tg.PhotosPhotosSlice:
+			photos = v.Photos
+		}
+
+		type photoInfo struct {
+			ID      int64  `json:"id"`
+			Date    string `json:"date"`
+			Sizes   int    `json:"sizes"`
+			SavedTo string `json:"saved_to,omitempty"`
+		}
+
+		if saveDir != "" {
+			if err := os.MkdirAll(saveDir, 0755); err != nil {
+				return fmt.Errorf("create dir: %w", err)
+			}
+		}
+
+		d := downloader.NewDownloader()
+		var out []photoInfo
+		for _, ph := range photos {
+			photo, ok := ph.(*tg.Photo)
+			if !ok {
+				continue
+			}
+			info := photoInfo{
+				ID:    photo.ID,
+				Date:  time.Unix(int64(photo.Date), 0).UTC().Format(time.RFC3339),
+				Sizes: len(photo.Sizes),
+			}
+			if saveDir != "" {
+				bestType, bestSize := "", 0
+				for _, sz := range photo.Sizes {
+					if ps, ok := sz.(*tg.PhotoSize); ok && ps.Size > bestSize {
+						bestSize = ps.Size
+						bestType = ps.Type
+					}
+				}
+				if bestType == "" {
+					bestType = "y"
+				}
+				loc := &tg.InputPhotoFileLocation{
+					ID:            photo.ID,
+					AccessHash:    photo.AccessHash,
+					FileReference: photo.FileReference,
+					ThumbSize:     bestType,
+				}
+				outPath := filepath.Join(saveDir, fmt.Sprintf("%d.jpg", photo.ID))
+				if _, err := d.Download(api, loc).ToPath(ctx, outPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to download photo %d: %v\n", photo.ID, err)
+				} else {
+					info.SavedTo = outPath
+				}
+			}
+			out = append(out, info)
+		}
+
+		return printJSON(map[string]any{"user": name, "photos": out, "total": len(out)})
+	})
+}
+
+// cmdDownloadMedia downloads the media from a specific message.
+func cmdDownloadMedia(c config, name string, msgID int, outDir string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+
+		ids := []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}}
+		var result tg.MessagesMessagesClass
+		if ch, ok := p.(peers.Channel); ok {
+			result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: ch.InputChannel(),
+				ID:      ids,
+			})
+		} else {
+			result, err = api.MessagesGetMessages(ctx, ids)
+		}
+		if err != nil {
+			return err
+		}
+
+		msgs, _, _, err := extractHistoryMessages(result)
+		if err != nil {
+			return err
+		}
+
+		var msg *tg.Message
+		for _, m := range msgs {
+			if mm, ok := m.(*tg.Message); ok && mm.ID == msgID {
+				msg = mm
+				break
+			}
+		}
+		if msg == nil {
+			return fmt.Errorf("message %d not found", msgID)
+		}
+		if msg.Media == nil {
+			return fmt.Errorf("message %d has no media", msgID)
+		}
+
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			return fmt.Errorf("create dir: %w", err)
+		}
+
+		d := downloader.NewDownloader()
+		switch media := msg.Media.(type) {
+		case *tg.MessageMediaPhoto:
+			photo, ok := media.Photo.(*tg.Photo)
+			if !ok {
+				return fmt.Errorf("invalid photo in message %d", msgID)
+			}
+			bestType, bestSize := "", 0
+			for _, sz := range photo.Sizes {
+				if ps, ok := sz.(*tg.PhotoSize); ok && ps.Size > bestSize {
+					bestSize = ps.Size
+					bestType = ps.Type
+				}
+			}
+			if bestType == "" {
+				bestType = "y"
+			}
+			loc := &tg.InputPhotoFileLocation{
+				ID:            photo.ID,
+				AccessHash:    photo.AccessHash,
+				FileReference: photo.FileReference,
+				ThumbSize:     bestType,
+			}
+			outPath := filepath.Join(outDir, fmt.Sprintf("%d.jpg", msgID))
+			if _, err := d.Download(api, loc).ToPath(ctx, outPath); err != nil {
+				return fmt.Errorf("download: %w", err)
+			}
+			return printJSON(map[string]any{"saved_to": outPath, "type": "photo"})
+
+		case *tg.MessageMediaDocument:
+			doc, ok := media.Document.(*tg.Document)
+			if !ok {
+				return fmt.Errorf("invalid document in message %d", msgID)
+			}
+			filename := ""
+			for _, attr := range doc.Attributes {
+				if fn, ok := attr.(*tg.DocumentAttributeFilename); ok {
+					filename = fn.FileName
+					break
+				}
+			}
+			if filename == "" {
+				filename = fmt.Sprintf("%d%s", msgID, extFromMIME(doc.MimeType))
+			}
+			loc := &tg.InputDocumentFileLocation{
+				ID:            doc.ID,
+				AccessHash:    doc.AccessHash,
+				FileReference: doc.FileReference,
+				ThumbSize:     "",
+			}
+			outPath := filepath.Join(outDir, filename)
+			if _, err := d.Download(api, loc).ToPath(ctx, outPath); err != nil {
+				return fmt.Errorf("download: %w", err)
+			}
+			return printJSON(map[string]any{"saved_to": outPath, "type": "document", "mime": doc.MimeType})
+
+		default:
+			return fmt.Errorf("message %d has non-downloadable media: %T", msgID, msg.Media)
+		}
+	})
+}
+
+func extFromMIME(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/wav":
+		return ".wav"
+	case "application/pdf":
+		return ".pdf"
+	case "application/zip":
+		return ".zip"
+	case "application/x-tgsticker":
+		return ".tgs"
+	default:
+		exts, _ := mime.ExtensionsByType(mimeType)
+		if len(exts) > 0 {
+			return exts[0]
+		}
+		return ""
+	}
+}
+
+// cmdPin pins a message in a chat.
+func cmdPin(c config, name string, msgID int, silent bool) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		_, err = api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Silent: silent,
+			Unpin:  false,
+			Peer:   p.InputPeer(),
+			ID:     msgID,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Message pinned")
+		return nil
+	})
+}
+
+// cmdUnpin unpins a message in a chat.
+func cmdUnpin(c config, name string, msgID int) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		_, err = api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Unpin: true,
+			Peer:  p.InputPeer(),
+			ID:    msgID,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Message unpinned")
+		return nil
+	})
+}
+
+// cmdMute mutes notifications for a dialog. duration=0 means permanent.
+func cmdMute(c config, name string, duration time.Duration) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		var muteUntil int
+		if duration <= 0 {
+			muteUntil = 2147483647 // max int32 = permanent
+		} else {
+			muteUntil = int(time.Now().Add(duration).Unix())
+		}
+		settings := tg.InputPeerNotifySettings{}
+		settings.Flags.Set(2) // flag bit 2 = MuteUntil present
+		settings.MuteUntil = muteUntil
+		_, err = api.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+			Peer:     &tg.InputNotifyPeer{Peer: p.InputPeer()},
+			Settings: settings,
+		})
+		if err != nil {
+			return err
+		}
+		if duration <= 0 {
+			fmt.Fprintln(os.Stderr, "Muted permanently")
+		} else {
+			fmt.Fprintf(os.Stderr, "Muted for %v\n", duration)
+		}
+		return nil
+	})
+}
+
+// cmdUnmute unmutes notifications for a dialog.
+func cmdUnmute(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		settings := tg.InputPeerNotifySettings{}
+		settings.Flags.Set(2)
+		settings.MuteUntil = 0
+		_, err = api.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+			Peer:     &tg.InputNotifyPeer{Peer: p.InputPeer()},
+			Settings: settings,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Unmuted")
+		return nil
+	})
+}
+
+// cmdTopics lists forum topics in a supergroup.
+func cmdTopics(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		if _, ok := p.(peers.Channel); !ok {
+			return fmt.Errorf("%s is not a supergroup or channel", name)
+		}
+		result, err := api.MessagesGetForumTopics(ctx, &tg.MessagesGetForumTopicsRequest{
+			Peer:  p.InputPeer(),
+			Limit: 100,
+		})
+		if err != nil {
+			return err
+		}
+
+		type topicInfo struct {
+			ID           int    `json:"id"`
+			Title        string `json:"title"`
+			Closed       bool   `json:"closed,omitempty"`
+			Pinned       bool   `json:"pinned,omitempty"`
+			Date         string `json:"date"`
+			TopMessage   int    `json:"top_message"`
+			UnreadCount  int    `json:"unread_count,omitempty"`
+		}
+
+		var out []topicInfo
+		for _, t := range result.Topics {
+			topic, ok := t.(*tg.ForumTopic)
+			if !ok {
+				continue
+			}
+			out = append(out, topicInfo{
+				ID:          topic.ID,
+				Title:       topic.Title,
+				Closed:      topic.Closed,
+				Pinned:      topic.Pinned,
+				Date:        time.Unix(int64(topic.Date), 0).UTC().Format(time.RFC3339),
+				TopMessage:  topic.TopMessage,
+				UnreadCount: topic.UnreadCount,
+			})
+		}
+
+		return printJSON(map[string]any{"topics": out, "total": len(out)})
+	})
+}
+
+// cmdInviteLink generates (or returns) an invite link for a chat.
+func cmdInviteLink(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		result, err := api.MessagesExportChatInvite(ctx, &tg.MessagesExportChatInviteRequest{
+			Peer: p.InputPeer(),
+		})
+		if err != nil {
+			return err
+		}
+		inv, ok := result.(*tg.ChatInviteExported)
+		if !ok {
+			return fmt.Errorf("unexpected result type: %T", result)
+		}
+		return printJSON(map[string]any{
+			"link":            inv.Link,
+			"permanent":       inv.Permanent,
+			"revoked":         inv.Revoked,
+			"request_needed":  inv.RequestNeeded,
+			"usage":           inv.Usage,
+			"usage_limit":     inv.UsageLimit,
+		})
+	})
+}
+
+// cmdInvite invites a user or bot to a group/channel.
+// groupName may be a username, dialog name, or a raw numeric chat ID for regular groups.
+func cmdInvite(c config, groupName, userName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		// Resolve the target user first.
+		userPeer, err := resolvePeer(ctx, pm, userName)
+		if err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+		u, ok := userPeer.(peers.User)
+		if !ok {
+			return fmt.Errorf("%s is not a user", userName)
+		}
+		raw := u.Raw()
+		inputUser := &tg.InputUser{UserID: raw.ID, AccessHash: raw.AccessHash}
+
+		// If groupName is a bare integer, treat as a regular chat ID directly.
+		if chatID, convErr := strconv.ParseInt(groupName, 10, 64); convErr == nil {
+			_, err = api.MessagesAddChatUser(ctx, &tg.MessagesAddChatUserRequest{
+				ChatID:   chatID,
+				UserID:   inputUser,
+				FwdLimit: 100,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "Invited %s to chat %d\n", userName, chatID)
+			return nil
+		}
+
+		group, err := resolvePeer(ctx, pm, groupName)
+		if err != nil {
+			return fmt.Errorf("group: %w", err)
+		}
+
+		switch peer := group.(type) {
+		case peers.Channel:
+			_, err = api.ChannelsInviteToChannel(ctx, &tg.ChannelsInviteToChannelRequest{
+				Channel: peer.InputChannel(),
+				Users:   []tg.InputUserClass{inputUser},
+			})
+		case peers.Chat:
+			_, err = api.MessagesAddChatUser(ctx, &tg.MessagesAddChatUserRequest{
+				ChatID:   peer.Raw().ID,
+				UserID:   inputUser,
+				FwdLimit: 100,
+			})
+		default:
+			return fmt.Errorf("%s is not a group or channel", groupName)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Invited %s to %s\n", userName, groupName)
+		return nil
+	})
+}
+
 func cmdExport(c config, name string, limit int) error {
 	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, name)
@@ -991,6 +1874,59 @@ func cmdExport(c config, name string, limit int) error {
 			"total_messages": len(all),
 			"incomplete":     incomplete,
 			"messages":       all,
+		})
+	})
+}
+
+// cmdCreateGroup creates a new regular group with an optional list of initial members.
+func cmdCreateGroup(c config, title string, userNames []string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		var users []tg.InputUserClass
+		for _, name := range userNames {
+			p, err := resolvePeer(ctx, pm, name)
+			if err != nil {
+				return fmt.Errorf("user %s: %w", name, err)
+			}
+			u, ok := p.(peers.User)
+			if !ok {
+				return fmt.Errorf("%s is not a user", name)
+			}
+			raw := u.Raw()
+			users = append(users, &tg.InputUser{UserID: raw.ID, AccessHash: raw.AccessHash})
+		}
+
+		result, err := api.MessagesCreateChat(ctx, &tg.MessagesCreateChatRequest{
+			Users: users,
+			Title: title,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Extract chat ID from the Updates field
+		var chatID int64
+		if updFull, ok := result.Updates.(*tg.Updates); ok {
+			for _, upd := range updFull.Updates {
+				if u, ok := upd.(*tg.UpdateChatParticipants); ok {
+					chatID = u.Participants.GetChatID()
+					break
+				}
+			}
+			if chatID == 0 {
+				for _, ch := range updFull.Chats {
+					if chat, ok := ch.(*tg.Chat); ok {
+						chatID = chat.ID
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "Group %q created (id: %d)\n", title, chatID)
+		return printJSON(map[string]any{
+			"status":  "created",
+			"title":   title,
+			"chat_id": chatID,
 		})
 	})
 }
