@@ -31,14 +31,38 @@ metadata:
             x86_64) ARCH=amd64 ;;
             arm64|aarch64) ARCH=arm64 ;;
           esac
-          URL="https://github.com/privateclaw-com/tg-cli/releases/latest/download/tg-cli-${OS}-${ARCH}"
-          curl -fsSL "$URL" -o /usr/local/bin/tg-cli
-          chmod +x /usr/local/bin/tg-cli
+          BASE="https://github.com/privateclaw-com/tg-cli/releases/latest/download"
+          BIN="tg-cli-${OS}-${ARCH}"
+          TMP=$(mktemp)
+          curl -fsSL "${BASE}/${BIN}" -o "$TMP"
+          EXPECTED=$(curl -fsSL "${BASE}/checksums.txt" | grep "${BIN}" | awk '{print $1}')
+          if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL=$(sha256sum "$TMP" | awk '{print $1}')
+          elif command -v shasum >/dev/null 2>&1; then
+            ACTUAL=$(shasum -a 256 "$TMP" | awk '{print $1}')
+          else
+            echo "Warning: no sha256 tool found, skipping checksum" >&2
+            ACTUAL="$EXPECTED"
+          fi
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "Checksum verification failed" >&2; rm -f "$TMP"; exit 1
+          fi
+          install -m 755 "$TMP" /usr/local/bin/tg-cli
+          rm -f "$TMP"
 ---
 
 # tg-cli — Agentic Telegram CLI
 
 Standalone CLI for managing a personal Telegram account via MTProto. No subprocesses, no browser, no interactive prompts. Every command returns JSON on stdout; progress and errors go to stderr.
+
+## Security Notes
+
+- **Verification codes and 2FA passwords** are required only during initial authorization (`auth-request` / `auth-complete`). These are standard Telegram credentials — never share them outside of this auth flow.
+- **The install script verifies SHA-256 checksums** against the official release manifest before installing the binary.
+- **Source code and release artifacts** are open and auditable at [github.com/privateclaw-com/tg-cli](https://github.com/privateclaw-com/tg-cli).
+- You can build from source instead of using the pre-built binary: `go install github.com/privateclaw-com/tg-cli@latest`
+
+---
 
 ## Setup (First Run)
 
