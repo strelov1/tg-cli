@@ -725,9 +725,11 @@ func cmdInfo(c config, name string) error {
 				t = "channel"
 			}
 			about := ""
+			members := ch.ParticipantsCount
 			if full, ferr := api.ChannelsGetFullChannel(ctx, peer.InputChannel()); ferr == nil {
 				if fc, ok := full.FullChat.(*tg.ChannelFull); ok {
 					about = fc.About
+					members = fc.ParticipantsCount
 				}
 			}
 			return printJSON(map[string]any{
@@ -735,7 +737,7 @@ func cmdInfo(c config, name string) error {
 				"id":          ch.ID,
 				"title":       ch.Title,
 				"username":    ch.Username,
-				"members":     ch.ParticipantsCount,
+				"members":     members,
 				"description": about,
 			})
 		case peers.Chat:
