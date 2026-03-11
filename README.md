@@ -73,10 +73,16 @@ tg-cli dialogs --limit 50
 # Read messages
 tg-cli read durov
 tg-cli read team-chat --offset 1000
+tg-cli read team-chat --since 1h     # last 1 hour
+tg-cli read team-chat --since 7d     # last 7 days
 
 # Send a message
 tg-cli send @alice "Hello!"
 tg-cli send +12025551234 "Test"
+
+# Reply to a specific message
+tg-cli reply team-chat 12345 "Got it!"
+tg-cli reply @alice 99 "Sure, see you then"
 
 # Mark as read
 tg-cli mark-read team-chat
@@ -95,6 +101,9 @@ tg-cli leave golang_digest
 
 # Search messages in a dialog
 tg-cli search team-chat "deploy" --limit 20
+
+# Search across all chats
+tg-cli search-all "deployment failed" --limit 20
 ```
 
 ### Export history
@@ -145,8 +154,18 @@ Environment variables (take priority over config file):
 UNREAD=$(tg-cli dialogs --unread | jq '.[0].name' -r)
 tg-cli read "$UNREAD" | jq '.messages[-1].text'
 
+# Read only recent messages (last hour)
+tg-cli read team-chat --since 1h | jq '.messages[].text'
+
+# Reply to a message
+MSG_ID=$(tg-cli read @alice | jq '.messages[-1].id')
+tg-cli reply @alice "$MSG_ID" "Got it, on it now"
+
 # Send and confirm delivery
 tg-cli send @alice "Task complete" && echo "OK"
+
+# Search across all chats for a keyword
+tg-cli search-all "urgent" --limit 10 | jq '.results[].text'
 
 # Export and analyze
 tg-cli export project-chat --limit 100 | jq '.messages[].text' | grep -i "deploy"

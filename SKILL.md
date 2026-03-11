@@ -3,12 +3,13 @@ name: tg-cli
 description: >
   Manage the user's personal Telegram account directly from the command line.
   Use when the user asks to: read Telegram messages or chats, list dialogs or unread messages,
-  send a message as themselves on Telegram, search messages inside a chat, join or leave a
-  group or channel, export full chat history, mark messages as read, or search for public
-  Telegram groups. This is for the user's personal account (MTProto, not a bot).
+  send a message as themselves on Telegram, reply to a specific message, search messages inside
+  a chat or across all chats, join or leave a group or channel, export full chat history,
+  mark messages as read, or search for public Telegram groups.
+  This is for the user's personal account (MTProto, not a bot).
   Two-step agent-friendly auth: call auth-request, get the code from the user, then call
   auth-complete — no interactive TTY needed.
-version: 1.0.0
+version: 1.1.0
 metadata:
   openclaw:
     emoji: '✈️'
@@ -132,6 +133,9 @@ tg-cli read team-chat
 tg-cli read @username
 tg-cli read +12025551234
 tg-cli read team-chat --offset 1000   # paginate backwards
+tg-cli read team-chat --since 1h      # messages from last 1 hour
+tg-cli read team-chat --since 30m     # messages from last 30 minutes
+tg-cli read team-chat --since 7d      # messages from last 7 days
 ```
 
 Output:
@@ -149,6 +153,15 @@ tg-cli send team-chat "Build is done ✅"
 tg-cli send +12025551234 "Hey there"
 ```
 
+### Reply to a message
+
+```bash
+tg-cli reply team-chat 12345 "Got it, thanks!"
+tg-cli reply @alice 99 "Sure, see you then"
+```
+
+Replies to the message with the given ID in the specified dialog.
+
 ### Mark as read
 
 ```bash
@@ -164,6 +177,17 @@ tg-cli search team-chat "deploy" --limit 20
 Output:
 ```json
 {"results": [...], "total": 5, "query": "deploy", "dialog": "team-chat"}
+```
+
+### Search messages across all chats
+
+```bash
+tg-cli search-all "deployment failed" --limit 20
+```
+
+Output:
+```json
+{"results": [...], "total": 3, "query": "deployment failed"}
 ```
 
 ### Search public groups/channels
