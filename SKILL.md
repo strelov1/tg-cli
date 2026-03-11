@@ -3,13 +3,15 @@ name: tg-cli
 description: >
   Manage the user's personal Telegram account directly from the command line.
   Use when the user asks to: read Telegram messages or chats, list dialogs or unread messages,
-  send a message as themselves on Telegram, reply to a specific message, search messages inside
+  send a message or file as themselves on Telegram, reply to or edit a specific message,
+  delete messages, add reactions, forward messages between chats, search messages inside
   a chat or across all chats, join or leave a group or channel, export full chat history,
-  mark messages as read, or search for public Telegram groups.
+  mark messages as read, search for public Telegram groups, get info about a chat or user,
+  list group members, or watch a dialog for new messages in real time.
   This is for the user's personal account (MTProto, not a bot).
   Two-step agent-friendly auth: call auth-request, get the code from the user, then call
   auth-complete — no interactive TTY needed.
-version: 1.1.0
+version: 1.2.0
 metadata:
   openclaw:
     emoji: '✈️'
@@ -160,7 +162,41 @@ tg-cli reply team-chat 12345 "Got it, thanks!"
 tg-cli reply @alice 99 "Sure, see you then"
 ```
 
-Replies to the message with the given ID in the specified dialog.
+### Edit a message
+
+```bash
+tg-cli edit team-chat 12345 "Updated text here"
+```
+
+Only works on your own messages.
+
+### Delete messages
+
+```bash
+tg-cli delete team-chat 12345
+tg-cli delete team-chat 100 101 102   # delete multiple
+```
+
+### React to a message
+
+```bash
+tg-cli react team-chat 12345 👍
+tg-cli react @alice 99 ❤️
+```
+
+### Forward a message
+
+```bash
+tg-cli forward team-chat 12345 @alice
+tg-cli forward inbox 99 project-chat
+```
+
+### Send a file
+
+```bash
+tg-cli send-file @alice /path/to/report.pdf
+tg-cli send-file team-chat ./screenshot.png
+```
 
 ### Mark as read
 
@@ -189,6 +225,40 @@ Output:
 ```json
 {"results": [...], "total": 3, "query": "deployment failed"}
 ```
+
+### Get info about a user, group, or channel
+
+```bash
+tg-cli info @alice
+tg-cli info team-chat
+tg-cli info @golang_digest
+```
+
+Output for a channel:
+```json
+{"type": "supergroup", "id": 123, "title": "Team Chat", "username": "teamchat", "members": 42, "description": "..."}
+```
+
+### List group members
+
+```bash
+tg-cli members team-chat
+tg-cli members @golang_digest --limit 50
+```
+
+Output:
+```json
+{"members": [{"id": 1, "username": "alice", "first_name": "Alice"}], "total": 1}
+```
+
+### Watch for new messages
+
+```bash
+tg-cli watch team-chat             # poll every 5s (default)
+tg-cli watch @alice --interval 10  # poll every 10s
+```
+
+Prints each new message as a JSON object to stdout as it arrives. Runs until Ctrl+C or `--timeout`.
 
 ### Search public groups/channels
 

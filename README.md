@@ -80,9 +80,25 @@ tg-cli read team-chat --since 7d     # last 7 days
 tg-cli send @alice "Hello!"
 tg-cli send +12025551234 "Test"
 
+# Send a file
+tg-cli send-file @alice ./report.pdf
+tg-cli send-file team-chat /tmp/screenshot.png
+
 # Reply to a specific message
 tg-cli reply team-chat 12345 "Got it!"
-tg-cli reply @alice 99 "Sure, see you then"
+
+# Edit own message
+tg-cli edit team-chat 12345 "Updated text"
+
+# Delete messages (one or many)
+tg-cli delete team-chat 12345
+tg-cli delete team-chat 100 101 102
+
+# Add a reaction
+tg-cli react team-chat 12345 👍
+
+# Forward a message to another dialog
+tg-cli forward team-chat 12345 @alice
 
 # Mark as read
 tg-cli mark-read team-chat
@@ -104,6 +120,17 @@ tg-cli search team-chat "deploy" --limit 20
 
 # Search across all chats
 tg-cli search-all "deployment failed" --limit 20
+
+# Get info about a chat or user
+tg-cli info @alice
+tg-cli info team-chat
+
+# List members
+tg-cli members team-chat --limit 50
+
+# Watch for new messages (polls every 5s, prints JSON per message)
+tg-cli watch team-chat
+tg-cli watch @alice --interval 10
 ```
 
 ### Export history
@@ -161,8 +188,27 @@ tg-cli read team-chat --since 1h | jq '.messages[].text'
 MSG_ID=$(tg-cli read @alice | jq '.messages[-1].id')
 tg-cli reply @alice "$MSG_ID" "Got it, on it now"
 
-# Send and confirm delivery
-tg-cli send @alice "Task complete" && echo "OK"
+# Send "processing..." then edit to result
+MSG=$(tg-cli send team-chat "⏳ Processing...")
+tg-cli edit team-chat "$MSG_ID" "✅ Done!"
+
+# React to acknowledge without replying
+tg-cli react team-chat 12345 👍
+
+# Forward an important message to another chat
+tg-cli forward team-chat 12345 @boss
+
+# Send a file
+tg-cli send-file @alice ./report.pdf
+
+# Find out who's in the group
+tg-cli members team-chat | jq '.members[].username'
+
+# Watch a dialog for new messages (agent event loop)
+tg-cli watch team-chat | while read line; do
+  TEXT=$(echo "$line" | jq -r '.text')
+  echo "New: $TEXT"
+done
 
 # Search across all chats for a keyword
 tg-cli search-all "urgent" --limit 10 | jq '.results[].text'

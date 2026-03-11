@@ -42,13 +42,21 @@ Telegram:
   read <name> [--offset <n>] [--since <duration>]     Read messages (--since 1h, 30m, 7d)
   export <name> [--limit <n>]                         Export full history (stdout JSON)
   send <name> <text...>                               Send message
+  send-file <name> <path>                             Send a file or document
   reply <name> <message-id> <text...>                 Reply to a specific message
+  edit <name> <message-id> <text...>                  Edit own message
+  delete <name> <message-id> [<id>...]                Delete message(s)
+  react <name> <message-id> <emoji>                   Add reaction to a message
+  forward <from> <message-id> <to>                    Forward message to another dialog
   mark-read <name>                                    Mark dialog as read
   search <dialog> <query> [--limit <n>]               Search messages in dialog
   search-all <query> [--limit <n>]                    Search messages across all chats
   search-groups <query> [--limit <n>]                 Search public groups/channels
   join <target>                                       Join group/channel (username or t.me link)
   leave <name>                                        Leave group/channel
+  info <name>                                         Get info about a user, group, or channel
+  members <name> [--limit <n>]                        List members of a group or channel
+  watch <name> [--interval <seconds>]                 Watch for new messages (default: 5s poll)
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
@@ -239,6 +247,100 @@ func main() {
 			fatalf("invalid message ID %q: must be a number", pos[1])
 		}
 		if err := cmdReply(c, pos[0], msgID, strings.Join(pos[2:], " ")); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "edit":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli edit <name> <message-id> <text...>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdEdit(c, pos[0], msgID, strings.Join(pos[2:], " ")); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "delete":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli delete <name> <message-id> [<id>...]")
+		}
+		var msgIDs []int
+		for _, s := range pos[1:] {
+			id, err := strconv.Atoi(s)
+			if err != nil {
+				fatalf("invalid message ID %q: must be a number", s)
+			}
+			msgIDs = append(msgIDs, id)
+		}
+		if err := cmdDelete(c, pos[0], msgIDs); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "react":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli react <name> <message-id> <emoji>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdReact(c, pos[0], msgID, pos[2]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "forward":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli forward <from> <message-id> <to>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdForward(c, pos[0], msgID, pos[2]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "send-file":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli send-file <name> <path>")
+		}
+		if err := cmdSendFile(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "info":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli info <name>")
+		}
+		if err := cmdInfo(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "members":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli members <name> [--limit <n>]")
+		}
+		limit, _ := flagInt(args, "--limit", 100)
+		if err := cmdMembers(c, pos[0], limit); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "watch":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli watch <name> [--interval <seconds>]")
+		}
+		interval, _ := flagInt(args, "--interval", 5)
+		if err := cmdWatch(c, pos[0], interval); err != nil {
 			fatalf("%v", err)
 		}
 
