@@ -776,3 +776,223 @@ func TestFormatMessagesFull_multipleMessages(t *testing.T) {
 		t.Errorf("unexpected IDs: %v", []int{out[0].ID, out[1].ID, out[2].ID})
 	}
 }
+
+// ── adminRightsMap ──
+
+func TestAdminRightsMap_nil(t *testing.T) {
+	if m := adminRightsMap(nil); m != nil {
+		t.Errorf("expected nil for nil input, got %v", m)
+	}
+}
+
+func TestAdminRightsMap_empty(t *testing.T) {
+	r := &tg.ChatAdminRights{}
+	m := adminRightsMap(r)
+	if len(m) != 0 {
+		t.Errorf("expected empty map, got %v", m)
+	}
+}
+
+func TestAdminRightsMap_singlePerm(t *testing.T) {
+	r := &tg.ChatAdminRights{PostMessages: true}
+	m := adminRightsMap(r)
+	if !m["post_messages"] {
+		t.Error("expected post_messages = true")
+	}
+	if len(m) != 1 {
+		t.Errorf("expected 1 entry, got %d: %v", len(m), m)
+	}
+}
+
+func TestAdminRightsMap_allPerms(t *testing.T) {
+	r := &tg.ChatAdminRights{
+		ChangeInfo:     true,
+		PostMessages:   true,
+		EditMessages:   true,
+		DeleteMessages: true,
+		BanUsers:       true,
+		InviteUsers:    true,
+		PinMessages:    true,
+		AddAdmins:      true,
+		Anonymous:      true,
+		ManageCall:     true,
+		ManageTopics:   true,
+	}
+	m := adminRightsMap(r)
+	expected := []string{
+		"change_info", "post_messages", "edit_messages", "delete_messages",
+		"ban_users", "invite_users", "pin_messages", "add_admins",
+		"anonymous", "manage_call", "manage_topics",
+	}
+	if len(m) != len(expected) {
+		t.Fatalf("expected %d entries, got %d: %v", len(expected), len(m), m)
+	}
+	for _, k := range expected {
+		if !m[k] {
+			t.Errorf("expected %q = true", k)
+		}
+	}
+}
+
+// ── parseAdminPerms ──
+
+func TestParseAdminPerms_empty(t *testing.T) {
+	r := parseAdminPerms(nil)
+	if r.PostMessages || r.DeleteMessages || r.BanUsers {
+		t.Error("expected all false for empty input")
+	}
+}
+
+func TestParseAdminPerms_single(t *testing.T) {
+	r := parseAdminPerms([]string{"post"})
+	if !r.PostMessages {
+		t.Error("expected PostMessages = true")
+	}
+	if r.EditMessages || r.DeleteMessages {
+		t.Error("expected other perms = false")
+	}
+}
+
+func TestParseAdminPerms_all(t *testing.T) {
+	r := parseAdminPerms([]string{"all"})
+	if !r.PostMessages || !r.EditMessages || !r.DeleteMessages ||
+		!r.BanUsers || !r.InviteUsers || !r.PinMessages ||
+		!r.ManageCall || !r.ManageTopics || !r.ChangeInfo {
+		t.Error("expected all relevant perms = true for 'all'")
+	}
+	// AddAdmins and Anonymous are NOT in 'all'
+	if r.AddAdmins {
+		t.Error("expected AddAdmins = false in 'all'")
+	}
+}
+
+func TestParseAdminPerms_multiple(t *testing.T) {
+	r := parseAdminPerms([]string{"post", "delete", "ban", "pin"})
+	if !r.PostMessages {
+		t.Error("expected PostMessages = true")
+	}
+	if !r.DeleteMessages {
+		t.Error("expected DeleteMessages = true")
+	}
+	if !r.BanUsers {
+		t.Error("expected BanUsers = true")
+	}
+	if !r.PinMessages {
+		t.Error("expected PinMessages = true")
+	}
+	if r.EditMessages || r.InviteUsers {
+		t.Error("expected EditMessages and InviteUsers = false")
+	}
+}
+
+func TestParseAdminPerms_caseInsensitive(t *testing.T) {
+	r := parseAdminPerms([]string{"POST", "Edit", "  delete  "})
+	if !r.PostMessages || !r.EditMessages || !r.DeleteMessages {
+		t.Error("expected case-insensitive matching")
+	}
+}
+
+func TestParseAdminPerms_allPerms(t *testing.T) {
+	perms := []string{"post", "edit", "delete", "ban", "invite", "pin",
+		"add_admins", "manage", "anonymous", "change_info", "topics"}
+	r := parseAdminPerms(perms)
+	if !r.PostMessages || !r.EditMessages || !r.DeleteMessages {
+		t.Error("expected post/edit/delete = true")
+	}
+	if !r.BanUsers || !r.InviteUsers || !r.PinMessages {
+		t.Error("expected ban/invite/pin = true")
+	}
+	if !r.AddAdmins || !r.ManageCall || !r.Anonymous {
+		t.Error("expected add_admins/manage/anonymous = true")
+	}
+	if !r.ChangeInfo || !r.ManageTopics {
+		t.Error("expected change_info/topics = true")
+	}
+}
+
+// ── printMessagesText ──
+
+func TestPrintMessagesText_empty(t *testing.T) {
+	// should not panic on empty input
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	printMessagesText(nil)
+	w.Close()
+	os.Stdout = old
+	buf := make([]byte, 64)
+	n, _ := r.Read(buf)
+	if n != 0 {
+		t.Errorf("expected no output for nil input, got %q", buf[:n])
+	}
+}
+
+func TestPrintMessagesText_singleMessage(t *testing.T) {
+	msgs := []tgMsg{
+		{
+			ID:   1,
+			Who:  "Alice",
+			When: time.Unix(1000, 0).UTC().Format(time.RFC3339),
+			Text: "Hello world",
+		},
+	}
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	printMessagesText(msgs)
+	w.Close()
+	os.Stdout = old
+
+	buf := make([]byte, 256)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+	if output == "" {
+		t.Error("expected output, got empty string")
+	}
+	if !containsStr(output, "Alice") {
+		t.Errorf("expected 'Alice' in output, got %q", output)
+	}
+	if !containsStr(output, "Hello world") {
+		t.Errorf("expected 'Hello world' in output, got %q", output)
+	}
+}
+
+func TestPrintMessagesText_unknownSender(t *testing.T) {
+	msgs := []tgMsg{
+		{
+			ID:   2,
+			Who:  "",
+			When: time.Unix(2000, 0).UTC().Format(time.RFC3339),
+			Text: "Anonymous msg",
+		},
+	}
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	printMessagesText(msgs)
+	w.Close()
+	os.Stdout = old
+
+	buf := make([]byte, 256)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+	if !containsStr(output, "?") {
+		t.Errorf("expected '?' placeholder for unknown sender, got %q", output)
+	}
+	if !containsStr(output, "Anonymous msg") {
+		t.Errorf("expected message text in output, got %q", output)
+	}
+}
+
+// containsStr is a simple substring helper used in tests.
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
+		func() bool {
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+			return false
+		}())
+}

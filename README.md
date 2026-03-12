@@ -84,8 +84,9 @@ tg-cli dialogs --limit 50
 # Read messages
 tg-cli read durov
 tg-cli read team-chat --offset 1000
-tg-cli read team-chat --since 1h     # last 1 hour
-tg-cli read team-chat --since 7d     # last 7 days
+tg-cli read team-chat --since 1h         # last 1 hour
+tg-cli read team-chat --since 7d         # last 7 days
+tg-cli read team-chat --format text      # human-readable [who]: text output
 
 # Get a specific message by ID
 tg-cli get-message team-chat 12345
@@ -96,6 +97,9 @@ tg-cli scan team-chat 100 200
 # Send a message
 tg-cli send @alice "Hello!"
 tg-cli send +12025551234 "Test"
+
+# Schedule a message
+tg-cli send team-chat "Meeting in 5 min!" --at "2026-03-15 09:55"
 
 # Send a file
 tg-cli send-file @alice ./report.pdf
@@ -186,6 +190,52 @@ tg-cli user-photos @alice --limit 5
 # Watch for new messages (polls every 5s, prints JSON per message)
 tg-cli watch team-chat
 tg-cli watch @alice --interval 10
+```
+
+### Group management
+
+```bash
+# List channels/groups where you are admin or owner
+tg-cli my-channels
+tg-cli my-channels --owned    # only where you are creator
+
+# Kick a user (removes from group, can re-join)
+tg-cli kick team-chat @alice
+
+# Ban a user (channel/supergroup only)
+tg-cli ban team-chat @alice              # permanent ban
+tg-cli ban team-chat @alice --until "2026-04-01 00:00"
+
+# Unban a user
+tg-cli unban team-chat @alice
+
+# Promote a user to admin
+tg-cli promote team-chat @alice                         # all permissions
+tg-cli promote team-chat @alice --perms post,delete     # specific permissions
+tg-cli promote team-chat @alice --perms all --rank "Editor"
+
+# Demote a user (remove admin rights)
+tg-cli demote team-chat @alice
+
+# Edit group/channel properties
+tg-cli set-title team-chat "New Name"
+tg-cli set-description team-chat "A great team"
+tg-cli set-photo team-chat ./logo.jpg
+
+# Create a new group
+tg-cli create-group "My Team" @alice @bob
+```
+
+Available `--perms`: `post`, `edit`, `delete`, `ban`, `invite`, `pin`, `add_admins`, `manage`, `anonymous`, `change_info`, `topics`, `all`.
+
+### Contacts
+
+```bash
+# List contacts
+tg-cli contacts
+
+# Add a contact by phone number
+tg-cli contacts add +12025551234 John Doe
 ```
 
 ### Export history
@@ -312,6 +362,28 @@ tg-cli search-all "urgent" --limit 10 | jq '.results[].text'
 
 # Export and analyze
 tg-cli export project-chat --limit 100 | jq '.messages[].text' | grep -i "deploy"
+
+# Read messages in human-readable format
+tg-cli read team-chat --since 1h --format text
+
+# Schedule a reminder message
+tg-cli send team-chat "Deploy starts now!" --at "2026-03-15 14:00"
+
+# List all channels you manage
+tg-cli my-channels | jq '.channels[].title'
+
+# Kick a spammer from a group
+tg-cli kick team-chat @spammer
+
+# Ban a user for 7 days
+tg-cli ban team-chat @baduser --until "$(date -d '+7 days' '+%Y-%m-%d %H:%M')"
+
+# Promote a moderator
+tg-cli promote team-chat @mod --perms delete,ban,pin --rank "Moderator"
+
+# View and manage contacts
+tg-cli contacts | jq '.contacts[].username'
+tg-cli contacts add +12025551234 John
 ```
 
 ## License

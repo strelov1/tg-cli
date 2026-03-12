@@ -40,9 +40,9 @@ Auth (interactive):
 Telegram:
   me                                     Account info
   dialogs [--unread] [--limit <n>]                    List dialogs (default: all)
-  read <name> [--offset <n>] [--since <duration>]     Read messages (--since 1h, 30m, 7d)
+  read <name> [--offset <n>] [--since <duration>] [--format text]  Read messages
   export <name> [--limit <n>]                         Export full history (stdout JSON)
-  send <name> <text...>                               Send message
+  send <name> <text...> [--at "YYYY-MM-DD HH:MM"]     Send message (optionally scheduled)
   send-file <name> <path>                             Send a file or document
   reply <name> <message-id> <text...>                 Reply to a specific message
   edit <name> <message-id> <text...>                  Edit own message
@@ -74,6 +74,17 @@ Telegram:
   user-photos <name> [--save-to <dir>]                List (and optionally download) user profile photos
   common-chats <user>                                 Find common groups/channels with a user
   create-group <title> [<user>...]                    Create a new group with optional initial members
+  my-channels [--owned]                               List channels/supergroups where you are admin
+  kick <group> <user>                                 Remove user from a group (can re-join)
+  ban <group> <user> [--until "YYYY-MM-DD HH:MM"]    Ban user from a channel/supergroup
+  unban <group> <user>                                Unban user in a channel/supergroup
+  promote <group> <user> [--perms <p,...>] [--rank <title>]  Make user an admin
+  demote <group> <user>                               Remove admin rights from a user
+  set-title <name> <title>                            Set group/channel title
+  set-description <name> <text>                       Set group/channel description
+  set-photo <name> <path>                             Set group/channel photo from file
+  contacts                                            List your Telegram contacts
+  contacts add <phone> <first-name> [<last-name>]    Add a contact by phone number
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
@@ -98,10 +109,17 @@ Examples:
   tg-cli dialogs --unread
   tg-cli dialogs --limit 50
   tg-cli read durov
+  tg-cli read team-chat --format text
   tg-cli export team-chat --limit 500 > chat.json
   tg-cli send @alice "Hello!"
+  tg-cli send team-chat "Scheduled msg" --at "2026-03-15 10:00"
   tg-cli join https://t.me/+AbCdEfGhIjK
   tg-cli search aws_group "CDK"
+  tg-cli my-channels
+  tg-cli kick team-chat @alice
+  tg-cli ban team-chat @alice --until "2026-04-01 00:00"
+  tg-cli promote team-chat @alice --perms post,delete --rank "Editor"
+  tg-cli contacts
   tg-cli --timeout 30 dialogs`
 
 func main() {
@@ -197,10 +215,11 @@ func main() {
 	case "read":
 		pos := positional(args)
 		if len(pos) == 0 {
-			fatalf("usage: tg-cli read <name> [--offset <n>] [--since <duration>]")
+			fatalf("usage: tg-cli read <name> [--offset <n>] [--since <duration>] [--format text]")
 		}
 		offset, args2 := flagInt(args, "--offset", 0)
-		sinceStr, _ := flagStr(args2, "--since")
+		sinceStr, args3 := flagStr(args2, "--since")
+		format, _ := flagStr(args3, "--format")
 		var since time.Time
 		if sinceStr != "" {
 			var err error
@@ -209,16 +228,25 @@ func main() {
 				fatalf("%v", err)
 			}
 		}
-		if err := cmdRead(c, pos[0], offset, since); err != nil {
+		if err := cmdRead(c, pos[0], offset, since, format); err != nil {
 			fatalf("%v", err)
 		}
 
 	case "send":
 		pos := positional(args)
 		if len(pos) < 2 {
-			fatalf("usage: tg-cli send <name> <text...>")
+			fatalf("usage: tg-cli send <name> <text...> [--at \"YYYY-MM-DD HH:MM\"]")
 		}
-		if err := cmdSend(c, pos[0], strings.Join(pos[1:], " ")); err != nil {
+		atStr, _ := flagStr(args, "--at")
+		var scheduleAt time.Time
+		if atStr != "" {
+			t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
+			if err != nil {
+				fatalf("--at: expected format \"YYYY-MM-DD HH:MM\", got %q", atStr)
+			}
+			scheduleAt = t
+		}
+		if err := cmdSend(c, pos[0], strings.Join(pos[1:], " "), scheduleAt); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -583,6 +611,126 @@ func main() {
 		members := pos[1:]
 		if err := cmdCreateGroup(c, title, members); err != nil {
 			fatalf("%v", err)
+		}
+
+	case "my-channels", "my-admins":
+		owned, _ := flagBool(args, "--owned")
+		if err := cmdMyChannels(c, owned); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "kick":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli kick <group> <user>")
+		}
+		if err := cmdKick(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "ban":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli ban <group> <user> [--until \"YYYY-MM-DD HH:MM\"]")
+		}
+		untilStr, _ := flagStr(args, "--until")
+		var until time.Time
+		if untilStr != "" {
+			t, err := time.ParseInLocation("2006-01-02 15:04", untilStr, time.Local)
+			if err != nil {
+				fatalf("--until: expected format \"YYYY-MM-DD HH:MM\", got %q", untilStr)
+			}
+			until = t
+		}
+		if err := cmdBan(c, pos[0], pos[1], until); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "unban":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli unban <group> <user>")
+		}
+		if err := cmdUnban(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "promote":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli promote <group> <user> [--perms <p,...>] [--rank <title>]")
+		}
+		permsStr, _ := flagStr(args, "--perms")
+		rank, _ := flagStr(args, "--rank")
+		var perms []string
+		if permsStr != "" {
+			for _, p := range strings.Split(permsStr, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					perms = append(perms, p)
+				}
+			}
+		}
+		if len(perms) == 0 {
+			perms = []string{"all"}
+		}
+		if err := cmdPromote(c, pos[0], pos[1], perms, rank); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "demote":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli demote <group> <user>")
+		}
+		if err := cmdDemote(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "set-title":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli set-title <name> <title>")
+		}
+		if err := cmdSetTitle(c, pos[0], strings.Join(pos[1:], " ")); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "set-description":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli set-description <name> <text>")
+		}
+		if err := cmdSetDescription(c, pos[0], strings.Join(pos[1:], " ")); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "set-photo":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli set-photo <name> <path>")
+		}
+		if err := cmdSetPhoto(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "contacts":
+		pos := positional(args)
+		if len(pos) > 0 && pos[0] == "add" {
+			if len(pos) < 3 {
+				fatalf("usage: tg-cli contacts add <phone> <first-name> [<last-name>]")
+			}
+			lastName := ""
+			if len(pos) >= 4 {
+				lastName = pos[3]
+			}
+			if err := cmdContactsAdd(c, pos[1], pos[2], lastName); err != nil {
+				fatalf("%v", err)
+			}
+		} else {
+			if err := cmdContacts(c); err != nil {
+				fatalf("%v", err)
+			}
 		}
 
 	default:

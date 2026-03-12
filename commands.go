@@ -149,6 +149,7 @@ func cmdDialogs(c config, onlyUnread bool, limit int) error {
 			Username    string `json:"username,omitempty"`
 			Type        string `json:"type"`
 			UnreadCount int    `json:"unread_count"`
+			Members     int    `json:"members,omitempty"`
 		}
 
 		var out []dialogInfo
@@ -175,12 +176,14 @@ func cmdDialogs(c config, onlyUnread bool, limit int) error {
 				info.Type = "group"
 				if c, ok := chatsMap[p.ChatID]; ok {
 					info.Name = c.Title
+					info.Members = c.ParticipantsCount
 				}
 			case *tg.PeerChannel:
 				info.ID = p.ChannelID
 				if ch, ok := channelsMap[p.ChannelID]; ok {
 					info.Name = ch.Title
 					info.Username = ch.Username
+					info.Members = ch.ParticipantsCount
 					if ch.Broadcast {
 						info.Type = "channel"
 					} else {
@@ -196,7 +199,7 @@ func cmdDialogs(c config, onlyUnread bool, limit int) error {
 	})
 }
 
-func cmdRead(c config, name string, offsetID int, since time.Time) error {
+func cmdRead(c config, name string, offsetID int, since time.Time, format string) error {
 	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, name)
 		if err != nil {
@@ -204,7 +207,7 @@ func cmdRead(c config, name string, offsetID int, since time.Time) error {
 		}
 
 		if !since.IsZero() {
-			return readSince(ctx, api, p, since)
+			return readSince(ctx, api, p, since, format)
 		}
 
 		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
@@ -224,6 +227,11 @@ func cmdRead(c config, name string, offsetID int, since time.Time) error {
 		em := buildEntityMaps(users, chats)
 		formatted := formatMessages(msgs, em)
 
+		if format == "text" {
+			printMessagesText(formatted)
+			return nil
+		}
+
 		// Offset for pagination = ID of last message
 		offset := 0
 		if len(msgs) > 0 {
@@ -239,8 +247,19 @@ func cmdRead(c config, name string, offsetID int, since time.Time) error {
 	})
 }
 
+// printMessagesText prints messages as human-readable plain text to stdout.
+func printMessagesText(msgs []tgMsg) {
+	for _, m := range msgs {
+		who := m.Who
+		if who == "" {
+			who = "?"
+		}
+		fmt.Printf("[%s] %s: %s\n", m.When, who, m.Text)
+	}
+}
+
 // readSince fetches all messages newer than the cutoff time (paginating as needed).
-func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Time) error {
+func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Time, format string) error {
 	cutoff := int(since.Unix())
 	var all []tgMsg
 	offsetID := 0
@@ -300,6 +319,10 @@ func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Tim
 		all[i], all[j] = all[j], all[i]
 	}
 
+	if format == "text" {
+		printMessagesText(all)
+		return nil
+	}
 	return printJSON(map[string]any{
 		"messages": all,
 		"total":    len(all),
@@ -355,22 +378,30 @@ func cmdSearchAll(c config, query string, limit int) error {
 	})
 }
 
-func cmdSend(c config, name, text string) error {
+func cmdSend(c config, name, text string, scheduleAt time.Time) error {
 	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, name)
 		if err != nil {
 			return err
 		}
 
-		_, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		req := &tg.MessagesSendMessageRequest{
 			Peer:     p.InputPeer(),
 			Message:  text,
 			RandomID: cryptoRandInt63(),
-		})
+		}
+		if !scheduleAt.IsZero() {
+			req.ScheduleDate = int(scheduleAt.Unix())
+		}
+		_, err = api.MessagesSendMessage(ctx, req)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stderr, "Message sent")
+		if !scheduleAt.IsZero() {
+			fmt.Fprintf(os.Stderr, "Message scheduled for %s\n", scheduleAt.Format("2006-01-02 15:04"))
+		} else {
+			fmt.Fprintln(os.Stderr, "Message sent")
+		}
 		return nil
 	})
 }
@@ -734,20 +765,61 @@ func cmdInfo(c config, name string) error {
 					members = fc.ParticipantsCount
 				}
 			}
-			return printJSON(map[string]any{
+			// Get current user's role in this channel
+			isCreator, isAdmin := false, false
+			var adminRights map[string]bool
+			if part, perr := api.ChannelsGetParticipant(ctx, &tg.ChannelsGetParticipantRequest{
+				Channel:     peer.InputChannel(),
+				Participant: &tg.InputPeerSelf{},
+			}); perr == nil {
+				switch pt := part.Participant.(type) {
+				case *tg.ChannelParticipantCreator:
+					isCreator, isAdmin = true, true
+					if pt.AdminRights != (tg.ChatAdminRights{}) {
+						adminRights = adminRightsMap(&pt.AdminRights)
+					}
+				case *tg.ChannelParticipantAdmin:
+					isAdmin = true
+					adminRights = adminRightsMap(&pt.AdminRights)
+				}
+			}
+			out := map[string]any{
 				"type":        t,
 				"id":          ch.ID,
 				"title":       ch.Title,
 				"username":    ch.Username,
 				"members":     members,
 				"description": about,
-			})
+				"is_creator":  isCreator,
+				"is_admin":    isAdmin,
+			}
+			if adminRights != nil {
+				out["admin_rights"] = adminRights
+			}
+			return printJSON(out)
 		case peers.Chat:
 			ch := peer.Raw()
 			about := ""
+			isCreator, isAdmin := false, false
 			if full, ferr := api.MessagesGetFullChat(ctx, ch.ID); ferr == nil {
 				if fc, ok := full.FullChat.(*tg.ChatFull); ok {
 					about = fc.About
+					if self, serr := client.Self(ctx); serr == nil {
+						if parts, ok := fc.Participants.(*tg.ChatParticipants); ok {
+							for _, part := range parts.Participants {
+								switch pt := part.(type) {
+								case *tg.ChatParticipantCreator:
+									if pt.UserID == self.ID {
+										isCreator, isAdmin = true, true
+									}
+								case *tg.ChatParticipantAdmin:
+									if pt.UserID == self.ID {
+										isAdmin = true
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 			return printJSON(map[string]any{
@@ -756,6 +828,8 @@ func cmdInfo(c config, name string) error {
 				"title":       ch.Title,
 				"members":     ch.ParticipantsCount,
 				"description": about,
+				"is_creator":  isCreator,
+				"is_admin":    isAdmin,
 			})
 		}
 		return fmt.Errorf("unknown peer type: %T", p)
@@ -1927,6 +2001,578 @@ func cmdCreateGroup(c config, title string, userNames []string) error {
 			"status":  "created",
 			"title":   title,
 			"chat_id": chatID,
+		})
+	})
+}
+
+// ── adminRightsMap ──────────────────────────────────────────────────────────
+
+// adminRightsMap converts ChatAdminRights to a map of right name → bool (true only).
+func adminRightsMap(r *tg.ChatAdminRights) map[string]bool {
+	if r == nil {
+		return nil
+	}
+	m := map[string]bool{}
+	if r.ChangeInfo {
+		m["change_info"] = true
+	}
+	if r.PostMessages {
+		m["post_messages"] = true
+	}
+	if r.EditMessages {
+		m["edit_messages"] = true
+	}
+	if r.DeleteMessages {
+		m["delete_messages"] = true
+	}
+	if r.BanUsers {
+		m["ban_users"] = true
+	}
+	if r.InviteUsers {
+		m["invite_users"] = true
+	}
+	if r.PinMessages {
+		m["pin_messages"] = true
+	}
+	if r.AddAdmins {
+		m["add_admins"] = true
+	}
+	if r.Anonymous {
+		m["anonymous"] = true
+	}
+	if r.ManageCall {
+		m["manage_call"] = true
+	}
+	if r.ManageTopics {
+		m["manage_topics"] = true
+	}
+	return m
+}
+
+// parseAdminPerms builds ChatAdminRights from a slice of perm names.
+// Supported: post, edit, delete, ban, invite, pin, add_admins, manage, anonymous, change_info, topics, all.
+func parseAdminPerms(perms []string) tg.ChatAdminRights {
+	var r tg.ChatAdminRights
+	for _, p := range perms {
+		switch strings.ToLower(strings.TrimSpace(p)) {
+		case "all":
+			r.ChangeInfo = true
+			r.PostMessages = true
+			r.EditMessages = true
+			r.DeleteMessages = true
+			r.BanUsers = true
+			r.InviteUsers = true
+			r.PinMessages = true
+			r.ManageCall = true
+			r.ManageTopics = true
+		case "post":
+			r.PostMessages = true
+		case "edit":
+			r.EditMessages = true
+		case "delete":
+			r.DeleteMessages = true
+		case "ban":
+			r.BanUsers = true
+		case "invite":
+			r.InviteUsers = true
+		case "pin":
+			r.PinMessages = true
+		case "add_admins":
+			r.AddAdmins = true
+		case "manage":
+			r.ManageCall = true
+		case "anonymous":
+			r.Anonymous = true
+		case "change_info":
+			r.ChangeInfo = true
+		case "topics":
+			r.ManageTopics = true
+		}
+	}
+	return r
+}
+
+// resolveInputUser resolves a name to tg.InputUser.
+func resolveInputUser(ctx context.Context, pm *peers.Manager, name string) (*tg.InputUser, error) {
+	p, err := resolvePeer(ctx, pm, name)
+	if err != nil {
+		return nil, err
+	}
+	u, ok := p.(peers.User)
+	if !ok {
+		return nil, fmt.Errorf("%s is not a user", name)
+	}
+	raw := u.Raw()
+	return &tg.InputUser{UserID: raw.ID, AccessHash: raw.AccessHash}, nil
+}
+
+// ── my-channels ────────────────────────────────────────────────────────────
+
+// cmdMyChannels lists channels/supergroups where the current user is admin or creator.
+// onlyOwned=true restricts to creator only.
+func cmdMyChannels(c config, onlyOwned bool) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		type chanInfo struct {
+			ID          int64            `json:"id"`
+			Title       string           `json:"title"`
+			Username    string           `json:"username,omitempty"`
+			Type        string           `json:"type"`
+			Members     int              `json:"members,omitempty"`
+			IsOwner     bool             `json:"is_owner"`
+			AdminRights map[string]bool  `json:"admin_rights,omitempty"`
+		}
+
+		var out []chanInfo
+
+		// Iterate dialogs; channel entities carry Creator/AdminRights without extra API calls.
+		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
+		offsetDate, offsetID := 0, 0
+
+		for {
+			result, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+				OffsetDate: offsetDate,
+				OffsetID:   offsetID,
+				OffsetPeer: offsetPeer,
+				Limit:      100,
+			})
+			if err != nil {
+				return err
+			}
+
+			var dialogs []tg.DialogClass
+			var messages []tg.MessageClass
+			var chats []tg.ChatClass
+			done := false
+
+			switch d := result.(type) {
+			case *tg.MessagesDialogs:
+				dialogs, messages, chats = d.Dialogs, d.Messages, d.Chats
+				done = true
+			case *tg.MessagesDialogsSlice:
+				dialogs, messages, chats = d.Dialogs, d.Messages, d.Chats
+			default:
+				return fmt.Errorf("unexpected dialogs type: %T", result)
+			}
+
+			channelMap := make(map[int64]*tg.Channel)
+			for _, ch := range chats {
+				if c, ok := ch.(*tg.Channel); ok {
+					channelMap[c.ID] = c
+				}
+			}
+
+			msgMap := make(map[int]*tg.Message)
+			for _, m := range messages {
+				if msg, ok := m.(*tg.Message); ok {
+					msgMap[msg.ID] = msg
+				}
+			}
+
+			for _, d := range dialogs {
+				dlg, ok := d.(*tg.Dialog)
+				if !ok {
+					continue
+				}
+				peer, ok := dlg.Peer.(*tg.PeerChannel)
+				if !ok {
+					continue
+				}
+				ch, ok := channelMap[peer.ChannelID]
+				if !ok {
+					continue
+				}
+				isOwner := ch.Creator
+				isAdmin := ch.Creator || !ch.AdminRights.Zero()
+				if !isAdmin {
+					continue
+				}
+				if onlyOwned && !isOwner {
+					continue
+				}
+				t := "supergroup"
+				if ch.Broadcast {
+					t = "channel"
+				}
+				item := chanInfo{
+					ID:      ch.ID,
+					Title:   ch.Title,
+					Username: ch.Username,
+					Type:    t,
+					Members: ch.ParticipantsCount,
+					IsOwner: isOwner,
+				}
+				if !ch.AdminRights.Zero() {
+					item.AdminRights = adminRightsMap(&ch.AdminRights)
+				}
+				out = append(out, item)
+			}
+
+			if done || len(dialogs) == 0 {
+				break
+			}
+			lastDlg, ok := dialogs[len(dialogs)-1].(*tg.Dialog)
+			if !ok {
+				break
+			}
+			lastMsg, ok := msgMap[lastDlg.TopMessage]
+			if !ok {
+				break
+			}
+			offsetDate = lastMsg.Date
+			offsetID = lastDlg.TopMessage
+			if p, ok := lastDlg.Peer.(*tg.PeerChannel); ok {
+				if ch, ok := channelMap[p.ChannelID]; ok {
+					offsetPeer = &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}
+				}
+			}
+		}
+
+		return printJSON(map[string]any{"channels": out, "total": len(out)})
+	})
+}
+
+// ── kick / ban / unban ─────────────────────────────────────────────────────
+
+// cmdKick removes a user from a group or channel without banning.
+func cmdKick(c config, groupName, userName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		group, err := resolvePeer(ctx, pm, groupName)
+		if err != nil {
+			return fmt.Errorf("group: %w", err)
+		}
+		inputUser, err := resolveInputUser(ctx, pm, userName)
+		if err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+
+		switch peer := group.(type) {
+		case peers.Channel:
+			_, err = api.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+				Channel:     peer.InputChannel(),
+				Participant: &tg.InputPeerUser{UserID: inputUser.UserID, AccessHash: inputUser.AccessHash},
+				BannedRights: tg.ChatBannedRights{
+					ViewMessages: true,
+					UntilDate:    int(time.Now().Add(30 * time.Second).Unix()),
+				},
+			})
+			if err != nil {
+				return err
+			}
+			// Immediately unban so they can re-join
+			_, err = api.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+				Channel:      peer.InputChannel(),
+				Participant:  &tg.InputPeerUser{UserID: inputUser.UserID, AccessHash: inputUser.AccessHash},
+				BannedRights: tg.ChatBannedRights{},
+			})
+		case peers.Chat:
+			_, err = api.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
+				ChatID: peer.Raw().ID,
+				UserID: inputUser,
+			})
+		default:
+			return fmt.Errorf("%s is not a group or channel", groupName)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Kicked %s from %s\n", userName, groupName)
+		return nil
+	})
+}
+
+// cmdBan bans a user from a channel. until=zero means permanent.
+func cmdBan(c config, groupName, userName string, until time.Time) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		group, err := resolvePeer(ctx, pm, groupName)
+		if err != nil {
+			return fmt.Errorf("group: %w", err)
+		}
+		inputUser, err := resolveInputUser(ctx, pm, userName)
+		if err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+		ch, ok := group.(peers.Channel)
+		if !ok {
+			return fmt.Errorf("ban requires a channel or supergroup (use kick for regular groups)")
+		}
+		untilDate := 0
+		if !until.IsZero() {
+			untilDate = int(until.Unix())
+		}
+		_, err = api.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+			Channel:     ch.InputChannel(),
+			Participant: &tg.InputPeerUser{UserID: inputUser.UserID, AccessHash: inputUser.AccessHash},
+			BannedRights: tg.ChatBannedRights{
+				ViewMessages: true,
+				UntilDate:    untilDate,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if until.IsZero() {
+			fmt.Fprintf(os.Stderr, "Banned %s from %s (permanent)\n", userName, groupName)
+		} else {
+			fmt.Fprintf(os.Stderr, "Banned %s from %s until %s\n", userName, groupName, until.Format("2006-01-02 15:04"))
+		}
+		return nil
+	})
+}
+
+// cmdUnban removes a ban from a user in a channel.
+func cmdUnban(c config, groupName, userName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		group, err := resolvePeer(ctx, pm, groupName)
+		if err != nil {
+			return fmt.Errorf("group: %w", err)
+		}
+		inputUser, err := resolveInputUser(ctx, pm, userName)
+		if err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+		ch, ok := group.(peers.Channel)
+		if !ok {
+			return fmt.Errorf("unban requires a channel or supergroup")
+		}
+		_, err = api.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+			Channel:      ch.InputChannel(),
+			Participant:  &tg.InputPeerUser{UserID: inputUser.UserID, AccessHash: inputUser.AccessHash},
+			BannedRights: tg.ChatBannedRights{},
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Unbanned %s in %s\n", userName, groupName)
+		return nil
+	})
+}
+
+// ── promote / demote ───────────────────────────────────────────────────────
+
+// cmdPromote makes a user an admin in a channel/supergroup with the given permissions.
+// perms is a comma-separated list: post,edit,delete,ban,invite,pin,add_admins,manage,anonymous,change_info,topics,all
+func cmdPromote(c config, groupName, userName string, perms []string, rank string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		group, err := resolvePeer(ctx, pm, groupName)
+		if err != nil {
+			return fmt.Errorf("group: %w", err)
+		}
+		inputUser, err := resolveInputUser(ctx, pm, userName)
+		if err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+		ch, ok := group.(peers.Channel)
+		if !ok {
+			return fmt.Errorf("promote requires a channel or supergroup")
+		}
+		rights := parseAdminPerms(perms)
+		_, err = api.ChannelsEditAdmin(ctx, &tg.ChannelsEditAdminRequest{
+			Channel:     ch.InputChannel(),
+			UserID:      inputUser,
+			AdminRights: rights,
+			Rank:        rank,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Promoted %s in %s\n", userName, groupName)
+		return nil
+	})
+}
+
+// cmdDemote removes admin rights from a user in a channel/supergroup.
+func cmdDemote(c config, groupName, userName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		group, err := resolvePeer(ctx, pm, groupName)
+		if err != nil {
+			return fmt.Errorf("group: %w", err)
+		}
+		inputUser, err := resolveInputUser(ctx, pm, userName)
+		if err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+		ch, ok := group.(peers.Channel)
+		if !ok {
+			return fmt.Errorf("demote requires a channel or supergroup")
+		}
+		_, err = api.ChannelsEditAdmin(ctx, &tg.ChannelsEditAdminRequest{
+			Channel:     ch.InputChannel(),
+			UserID:      inputUser,
+			AdminRights: tg.ChatAdminRights{},
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Demoted %s in %s\n", userName, groupName)
+		return nil
+	})
+}
+
+// ── set-title / set-description / set-photo ────────────────────────────────
+
+func cmdSetTitle(c config, name, title string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		switch peer := p.(type) {
+		case peers.Channel:
+			_, err = api.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+				Channel: peer.InputChannel(),
+				Title:   title,
+			})
+		case peers.Chat:
+			_, err = api.MessagesEditChatTitle(ctx, &tg.MessagesEditChatTitleRequest{
+				ChatID: peer.Raw().ID,
+				Title:  title,
+			})
+		default:
+			return fmt.Errorf("cannot set title for a user")
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Title updated to %q\n", title)
+		return nil
+	})
+}
+
+func cmdSetDescription(c config, name, desc string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		switch peer := p.(type) {
+		case peers.Channel:
+			_, err = api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+				Peer:  peer.InputPeer(),
+				About: desc,
+			})
+		case peers.Chat:
+			_, err = api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+				Peer:  peer.InputPeer(),
+				About: desc,
+			})
+		default:
+			return fmt.Errorf("cannot set description for a user")
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Description updated")
+		return nil
+	})
+}
+
+func cmdSetPhoto(c config, name, filePath string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, name)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		u := uploader.NewUploader(api)
+		uploaded, err := u.Upload(ctx, uploader.NewUpload(filepath.Base(filePath), f, stat.Size()))
+		if err != nil {
+			return fmt.Errorf("upload: %w", err)
+		}
+		photo := &tg.InputChatUploadedPhoto{File: uploaded}
+
+		switch peer := p.(type) {
+		case peers.Channel:
+			_, err = api.ChannelsEditPhoto(ctx, &tg.ChannelsEditPhotoRequest{
+				Channel: peer.InputChannel(),
+				Photo:   photo,
+			})
+		case peers.Chat:
+			_, err = api.MessagesEditChatPhoto(ctx, &tg.MessagesEditChatPhotoRequest{
+				ChatID: peer.Raw().ID,
+				Photo:  photo,
+			})
+		default:
+			return fmt.Errorf("cannot set photo for a user")
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Photo updated")
+		return nil
+	})
+}
+
+// ── contacts ───────────────────────────────────────────────────────────────
+
+func cmdContacts(c config) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		result, err := api.ContactsGetContacts(ctx, 0)
+		if err != nil {
+			return err
+		}
+		contacts, ok := result.(*tg.ContactsContacts)
+		if !ok {
+			return printJSON(map[string]any{"contacts": []any{}, "total": 0})
+		}
+		type contactInfo struct {
+			ID        int64  `json:"id"`
+			Phone     string `json:"phone,omitempty"`
+			Username  string `json:"username,omitempty"`
+			FirstName string `json:"first_name,omitempty"`
+			LastName  string `json:"last_name,omitempty"`
+		}
+		var out []contactInfo
+		for _, u := range contacts.Users {
+			if usr, ok := u.(*tg.User); ok {
+				out = append(out, contactInfo{
+					ID:        usr.ID,
+					Phone:     usr.Phone,
+					Username:  usr.Username,
+					FirstName: usr.FirstName,
+					LastName:  usr.LastName,
+				})
+			}
+		}
+		return printJSON(map[string]any{"contacts": out, "total": len(out)})
+	})
+}
+
+// cmdContactsAdd adds a contact by phone number.
+func cmdContactsAdd(c config, phone, firstName, lastName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		result, err := api.ContactsImportContacts(ctx, []tg.InputPhoneContact{
+			{
+				ClientID:  cryptoRandInt63(),
+				Phone:     phone,
+				FirstName: firstName,
+				LastName:  lastName,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if len(result.Users) == 0 {
+			return fmt.Errorf("no user found for phone %s", phone)
+		}
+		u, ok := result.Users[0].(*tg.User)
+		if !ok {
+			return fmt.Errorf("unexpected user type")
+		}
+		fmt.Fprintf(os.Stderr, "Contact added: %s %s (id: %d)\n", u.FirstName, u.LastName, u.ID)
+		return printJSON(map[string]any{
+			"id":         u.ID,
+			"phone":      u.Phone,
+			"username":   u.Username,
+			"first_name": u.FirstName,
+			"last_name":  u.LastName,
 		})
 	})
 }

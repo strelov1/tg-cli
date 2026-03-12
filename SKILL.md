@@ -3,19 +3,22 @@ name: tg-cli
 description: >
   Manage the user's personal Telegram account directly from the command line.
   Use when the user asks to: read Telegram messages or chats, list dialogs or unread messages,
-  send a message or file as themselves on Telegram, reply to or edit a specific message,
-  delete messages, add reactions, get reactions on a message, forward messages between chats,
-  copy-forward without attribution, search messages inside a chat or across all chats,
-  join or leave a group or channel, export full chat history, mark messages as read,
-  search for public Telegram groups, get info about a chat or user, list group members
+  send a message or file as themselves on Telegram, schedule a message for a future time,
+  reply to or edit a specific message, delete messages, add reactions, get reactions on a message,
+  forward messages between chats, copy-forward without attribution, search messages inside a chat
+  or across all chats, join or leave a group or channel, export full chat history, mark messages
+  as read, search for public Telegram groups, get info about a chat or user, list group members
   or admins, list forum topics, get or create an invite link, invite a user into a group,
   find common chats with a user, get a user's profile photos, download media from a message,
   pin or unpin a message, mute or unmute a chat, scan a message ID range, get a specific
-  message by ID, or watch a dialog for new messages in real time.
+  message by ID, watch a dialog for new messages in real time, create a group,
+  list channels/groups where the user is admin (my-channels), kick/ban/unban users,
+  promote or demote admins, set group title or description or photo,
+  list or add contacts.
   This is for the user's personal account (MTProto, not a bot).
   Two-step agent-friendly auth: call auth-request, get the code from the user, then call
   auth-complete — no interactive TTY needed. QR auth also available via auth-qr.
-version: 1.3.0
+version: 1.4.0
 metadata:
   openclaw:
     emoji: '✈️'
@@ -172,10 +175,11 @@ tg-cli read alice
 tg-cli read team-chat
 tg-cli read @username
 tg-cli read +12025551234
-tg-cli read team-chat --offset 1000   # paginate backwards
-tg-cli read team-chat --since 1h      # messages from last 1 hour
-tg-cli read team-chat --since 30m     # messages from last 30 minutes
-tg-cli read team-chat --since 7d      # messages from last 7 days
+tg-cli read team-chat --offset 1000       # paginate backwards
+tg-cli read team-chat --since 1h          # messages from last 1 hour
+tg-cli read team-chat --since 30m         # messages from last 30 minutes
+tg-cli read team-chat --since 7d          # messages from last 7 days
+tg-cli read team-chat --format text       # human-readable: [2024-01-01T10:00:00Z] Alice: Hello
 ```
 
 Output:
@@ -206,6 +210,9 @@ tg-cli scan team-chat 100 200
 tg-cli send @alice "Hello!"
 tg-cli send team-chat "Build is done ✅"
 tg-cli send +12025551234 "Hey there"
+
+# Schedule a message (local time)
+tg-cli send team-chat "Meeting in 5 min!" --at "2026-03-15 09:55"
 ```
 
 ### Reply to a message
@@ -418,6 +425,75 @@ tg-cli join https://t.me/+AbCdEfGhIjK
 ```bash
 tg-cli leave golang_digest
 tg-cli leave team-chat
+```
+
+### My channels / managed groups
+
+List channels and supergroups where the current user is admin or creator:
+
+```bash
+# All admin channels
+tg-cli my-channels
+
+# Only channels you own (creator)
+tg-cli my-channels --owned
+```
+
+Output: `{"channels": [{"id": 123, "title": "...", "type": "supergroup", "members": 500, "is_owner": true, "admin_rights": {...}}], "total": 1}`
+
+### Kick / ban / unban
+
+```bash
+# Kick user (removed, can re-join) — works for both regular groups and supergroups/channels
+tg-cli kick team-chat @alice
+
+# Ban user permanently (channel/supergroup only)
+tg-cli ban team-chat @alice
+
+# Ban until a specific date/time
+tg-cli ban team-chat @alice --until "2026-04-01 00:00"
+
+# Unban
+tg-cli unban team-chat @alice
+```
+
+### Promote / demote admins
+
+```bash
+# Promote with all standard permissions
+tg-cli promote team-chat @alice
+
+# Promote with specific permissions + custom title
+tg-cli promote team-chat @alice --perms post,edit,delete,pin --rank "Editor"
+
+# Demote (remove admin rights)
+tg-cli demote team-chat @alice
+```
+
+Available `--perms` values: `post`, `edit`, `delete`, `ban`, `invite`, `pin`, `add_admins`, `manage`, `anonymous`, `change_info`, `topics`, `all`.
+
+### Edit group/channel properties
+
+```bash
+# Rename a group or channel
+tg-cli set-title team-chat "Dev Team 2.0"
+
+# Change description
+tg-cli set-description team-chat "All things development"
+
+# Set a new photo from a local file
+tg-cli set-photo team-chat ./logo.png
+```
+
+### Contacts
+
+```bash
+# List all contacts
+tg-cli contacts
+
+# Add a contact by phone number
+tg-cli contacts add +12025551234 John
+tg-cli contacts add +12025551234 John Doe
 ```
 
 ### Export full chat history
