@@ -1,4 +1,4 @@
-# tg-cli
+# tg-cli — v1.5.0
 
 **Agentic-native Telegram CLI** — control Telegram from the command line with no interactive input required. Designed for AI agents: every command is a single call, output is JSON on stdout.
 
@@ -80,6 +80,8 @@ tg-cli accounts use +12025551234
 tg-cli dialogs
 tg-cli dialogs --unread
 tg-cli dialogs --limit 50
+tg-cli dialogs --type channel       # only channels
+tg-cli dialogs --archived           # archived dialogs
 
 # Read messages
 tg-cli read durov
@@ -87,6 +89,7 @@ tg-cli read team-chat --offset 1000
 tg-cli read team-chat --since 1h         # last 1 hour
 tg-cli read team-chat --since 7d         # last 7 days
 tg-cli read team-chat --format text      # human-readable [who]: text output
+tg-cli read team-chat --media-only  # only messages with files/photos
 
 # Get a specific message by ID
 tg-cli get-message team-chat 12345
@@ -104,6 +107,9 @@ tg-cli send team-chat "Meeting in 5 min!" --at "2026-03-15 09:55"
 # Send a file
 tg-cli send-file @alice ./report.pdf
 tg-cli send-file team-chat /tmp/screenshot.png
+
+# Send multiple files as album
+tg-cli send-album team-chat ./photo1.jpg ./photo2.jpg
 
 # Reply to a specific message
 tg-cli reply team-chat 12345 "Got it!"
@@ -190,6 +196,8 @@ tg-cli user-photos @alice --limit 5
 # Watch for new messages (polls every 5s, prints JSON per message)
 tg-cli watch team-chat
 tg-cli watch @alice --interval 10
+tg-cli watch team-chat --keyword "deploy"    # filter by keyword
+tg-cli watch team-chat --event new,edit      # include edits
 ```
 
 ### Group management
@@ -269,6 +277,77 @@ Export writes progress to stderr and JSON to stdout:
     }
   ]
 }
+```
+
+### Group analytics & moderation
+
+```bash
+# Channel/supergroup statistics
+tg-cli stats team-chat
+
+# Restrict a user (partial ban)
+tg-cli restrict team-chat @alice --no-send --no-media
+
+# Delete all messages from a user in a channel
+tg-cli delete-user-messages team-chat @spammer
+
+# Voice message transcription
+tg-cli transcribe team-chat 12345
+
+# Create a channel or supergroup
+tg-cli create-channel "My Channel"             # broadcast channel
+tg-cli create-channel "My Group" --supergroup  # supergroup
+tg-cli create-channel "My Channel" --username @mychannel
+```
+
+### Account management
+
+```bash
+# List active sessions
+tg-cli sessions
+
+# Terminate a session
+tg-cli sessions revoke 1234567890
+
+# Block / unblock
+tg-cli block @spammer
+tg-cli unblock @spammer
+tg-cli blocked
+
+# Delete conversation history
+tg-cli delete-history @alice
+tg-cli delete-history @alice --revoke   # delete for both sides
+
+# Archive / unarchive
+tg-cli archive team-chat
+tg-cli unarchive team-chat
+tg-cli dialogs --archived
+```
+
+### Member analytics
+
+```bash
+# Search members by name or username (no admin rights needed)
+tg-cli search-members team-chat "John"
+
+# Export all members to CSV
+tg-cli parse-members team-chat --limit 5000 --out members.csv
+tg-cli parse-members team-chat --format json
+
+# Who was active in the last N days
+tg-cli active-members team-chat --days 30
+tg-cli active-members team-chat --days 7 --out active.json
+```
+
+### Message tools
+
+```bash
+# Generate a t.me link to a specific message
+tg-cli message-link team-chat 12345
+
+# Send with rich text formatting
+tg-cli send team-chat "<b>Bold</b> and <i>italic</i>" --parse-mode html
+tg-cli send team-chat "**bold** and _italic_" --parse-mode markdown
 ```
 
 ## Global flags

@@ -114,6 +114,22 @@ func (em entityMaps) senderName(fromID tg.PeerClass) string {
 	return "?"
 }
 
+// senderID returns the numeric ID of the sender peer.
+func senderID(fromID tg.PeerClass) int64 {
+	if fromID == nil {
+		return 0
+	}
+	switch p := fromID.(type) {
+	case *tg.PeerUser:
+		return p.UserID
+	case *tg.PeerChannel:
+		return p.ChannelID
+	case *tg.PeerChat:
+		return p.ChatID
+	}
+	return 0
+}
+
 // ── Message helpers ──
 
 func extractHistoryMessages(r tg.MessagesMessagesClass) ([]tg.MessageClass, []tg.ChatClass, []tg.UserClass, error) {
@@ -153,6 +169,7 @@ func reactionEmoji(r tg.ReactionClass) string {
 type tgMsg struct {
 	ID         int            `json:"id"`
 	Who        string         `json:"who"`
+	WhoID      int64          `json:"who_id,omitempty"`
 	When       string         `json:"when"`
 	Text       string         `json:"text"`
 	Views      int            `json:"views,omitempty"`
@@ -166,6 +183,7 @@ type tgMsg struct {
 type tgMsgFull struct {
 	ID         int            `json:"id"`
 	Who        string         `json:"who,omitempty"`
+	WhoID      int64          `json:"who_id,omitempty"`
 	When       string         `json:"when"`
 	Text       string         `json:"text,omitempty"`
 	MediaType  string         `json:"media_type,omitempty"`
@@ -191,6 +209,7 @@ func formatMessagesFull(msgs []tg.MessageClass, em entityMaps) []tgMsgFull {
 		}
 		if msg.FromID != nil {
 			item.Who = em.senderName(msg.FromID)
+			item.WhoID = senderID(msg.FromID)
 		}
 		if msg.Media != nil {
 			item.MediaType = mediaTypeName(msg.Media)
@@ -282,14 +301,17 @@ func formatMessages(msgs []tg.MessageClass, em entityMaps) []tgMsg {
 			continue // skip service messages and empty
 		}
 		sender := ""
+		var senderIDVal int64
 		if msg.FromID != nil {
 			sender = em.senderName(msg.FromID)
+			senderIDVal = senderID(msg.FromID)
 		}
 		item := tgMsg{
-			ID:   msg.ID,
-			Who:  sender,
-			When: time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
-			Text: text,
+			ID:    msg.ID,
+			Who:   sender,
+			WhoID: senderIDVal,
+			When:  time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
+			Text:  text,
 		}
 		if v, ok := msg.GetViews(); ok {
 			item.Views = v
@@ -310,8 +332,9 @@ func formatMessages(msgs []tg.MessageClass, em entityMaps) []tgMsg {
 // ── Peer resolution ──
 
 // resolvePeer resolves a username, phone number, t.me URL, or numeric ID to a Telegram peer.
-// Numeric IDs are tried first as regular chat (group), then as channel/user.
-func resolvePeer(ctx context.Context, pm *peers.Manager, name string) (peers.Peer, error) {
+// Numeric IDs are tried as regular chat, user, and channel in order.
+// Falls back to loading recent dialogs to find entities not yet in the local peer store.
+func resolvePeer(ctx context.Context, pm *peers.Manager, api *tg.Client, name string) (peers.Peer, error) {
 	// Strip https://t.me/<username> → <username> for non-invite links
 	query := name
 	if strings.HasPrefix(query, "https://t.me/") && !strings.Contains(query, "/+") && !strings.Contains(query, "/joinchat/") {
@@ -321,13 +344,23 @@ func resolvePeer(ctx context.Context, pm *peers.Manager, name string) (peers.Pee
 		query = strings.TrimPrefix(query, "@")
 	}
 
-	// If it looks like a bare numeric ID, try resolving as a regular chat first.
+	// If it looks like a bare numeric ID, try all peer types.
 	if id, err := strconv.ParseInt(query, 10, 64); err == nil {
+		// Try as regular chat (works without access hash via MessagesGetChats)
 		if chat, err := pm.GetChat(ctx, id); err == nil {
 			return chat, nil
 		}
-		if chat, err := pm.ResolveChatID(ctx, id); err == nil {
-			return chat, nil
+		// Try as user (uses stored access hash if available)
+		if user, err := pm.ResolveUserID(ctx, id); err == nil {
+			return user, nil
+		}
+		// Try as channel (uses stored access hash if available)
+		if channel, err := pm.ResolveChannelID(ctx, id); err == nil {
+			return channel, nil
+		}
+		// Fallback: fetch recent dialogs to populate peer cache, then search by ID
+		if peer, err := resolveIDViaDialogs(ctx, pm, api, id); err == nil {
+			return peer, nil
 		}
 	}
 
@@ -336,6 +369,55 @@ func resolvePeer(ctx context.Context, pm *peers.Manager, name string) (peers.Pee
 		return nil, fmt.Errorf("cannot find %q: %w", name, err)
 	}
 	return p, nil
+}
+
+// resolveIDViaDialogs fetches up to 200 recent dialogs to find a peer by numeric ID.
+// It also populates the peer manager's cache so subsequent lookups succeed.
+func resolveIDViaDialogs(ctx context.Context, pm *peers.Manager, api *tg.Client, id int64) (peers.Peer, error) {
+	resp, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		Limit:      200,
+		OffsetPeer: &tg.InputPeerEmpty{},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var users []tg.UserClass
+	var chats []tg.ChatClass
+	switch d := resp.(type) {
+	case *tg.MessagesDialogs:
+		users, chats = d.Users, d.Chats
+	case *tg.MessagesDialogsSlice:
+		users, chats = d.Users, d.Chats
+	default:
+		return nil, fmt.Errorf("unexpected dialogs type %T", resp)
+	}
+
+	// Populate the peer manager's cache
+	if err := pm.Apply(ctx, users, chats); err != nil {
+		return nil, err
+	}
+
+	// Search for the entity with matching ID
+	for _, u := range users {
+		if usr, ok := u.(*tg.User); ok && usr.ID == id {
+			return pm.User(usr), nil
+		}
+	}
+	for _, ch := range chats {
+		switch c := ch.(type) {
+		case *tg.Channel:
+			if c.ID == id {
+				return pm.Channel(c), nil
+			}
+		case *tg.Chat:
+			if c.ID == id {
+				return pm.Chat(c), nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("peer with ID %d not found in recent dialogs (try @username)", id)
 }
 
 // extractInviteHash extracts the hash from a t.me invite link.

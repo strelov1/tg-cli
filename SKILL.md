@@ -15,10 +15,16 @@ description: >
   list channels/groups where the user is admin (my-channels), kick/ban/unban users,
   promote or demote admins, set group title or description or photo,
   list or add contacts.
+  search members by name/username, export all members to CSV, find active members,
+  transcribe voice messages, restrict users with partial bans, delete all messages
+  from a user, create channels or supergroups, manage active sessions,
+  block/unblock users, delete conversation history, archive/unarchive dialogs,
+  generate message links, send albums, watch with keyword filter and edit events,
+  send messages with HTML or Markdown formatting.
   This is for the user's personal account (MTProto, not a bot).
   Two-step agent-friendly auth: call auth-request, get the code from the user, then call
   auth-complete — no interactive TTY needed. QR auth also available via auth-qr.
-version: 1.4.0
+version: 1.5.0
 metadata:
   openclaw:
     emoji: '✈️'
@@ -586,6 +592,35 @@ tg-cli config set default-account +12025551234
 ```
 
 ---
+
+## Quick Reference
+
+| Action               | Command                                                         |
+| -------------------- | --------------------------------------------------------------- |
+| Search members       | `tg-cli search-members <group> <query>`                         |
+| Export members CSV   | `tg-cli parse-members <group> [--limit <n>] [--out file.csv]`   |
+| Active members       | `tg-cli active-members <group> [--days <n>]`                    |
+| Channel stats        | `tg-cli stats <name>`                                           |
+| Transcribe voice     | `tg-cli transcribe <name> <id>`                                 |
+| Restrict user        | `tg-cli restrict <group> <user> [--no-send] [--no-media]`       |
+| Delete user messages | `tg-cli delete-user-messages <chat> <user>`                     |
+| Create channel       | `tg-cli create-channel <title> [--supergroup] [--username @x]`  |
+| List sessions        | `tg-cli sessions`                                               |
+| Revoke session       | `tg-cli sessions revoke <hash>`                                 |
+| Block user           | `tg-cli block <user>`                                           |
+| Unblock user         | `tg-cli unblock <user>`                                         |
+| List blocked         | `tg-cli blocked`                                               |
+| Delete history       | `tg-cli delete-history <name> [--revoke]`                       |
+| Archive dialog       | `tg-cli archive <name>`                                         |
+| Unarchive dialog     | `tg-cli unarchive <name>`                                       |
+| Message link         | `tg-cli message-link <name> <id>`                               |
+| Send album           | `tg-cli send-album <name> <file1> [<file2>...]`                 |
+| Send with HTML/MD    | `tg-cli send <name> <text> --parse-mode html\|markdown`         |
+| Watch with filter    | `tg-cli watch <name> [--keyword <w>] [--event new,edit]`        |
+| Read media only      | `tg-cli read <name> --media-only`                               |
+| Read in text format  | `tg-cli read <name> --format text`                              |
+| Filter dialogs       | `tg-cli dialogs [--type user\|channel\|group] [--archived]`     |
+
 
 ## Common Errors
 

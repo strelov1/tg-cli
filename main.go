@@ -39,11 +39,12 @@ Auth (interactive):
 
 Telegram:
   me                                     Account info
-  dialogs [--unread] [--limit <n>]                    List dialogs (default: all)
-  read <name> [--offset <n>] [--since <duration>] [--format text]  Read messages
+  dialogs [--unread] [--limit <n>] [--type user|channel|group] [--archived]  List dialogs
+  read <name> [--offset <n>] [--since <duration>] [--format text] [--media-only]  Read messages
   export <name> [--limit <n>]                         Export full history (stdout JSON)
-  send <name> <text...> [--at "YYYY-MM-DD HH:MM"]     Send message (optionally scheduled)
+  send <name> <text...> [--at "YYYY-MM-DD HH:MM"] [--parse-mode html|markdown]  Send message
   send-file <name> <path>                             Send a file or document
+  send-album <name> <file1> [<file2>...]              Send a group of files as an album
   reply <name> <message-id> <text...>                 Reply to a specific message
   edit <name> <message-id> <text...>                  Edit own message
   delete <name> <message-id> [<id>...]                Delete message(s)
@@ -63,7 +64,7 @@ Telegram:
   admins <name>                                       List admins with their permissions
   topics <name>                                       List forum topics in a supergroup
   invite-link <name>                                  Generate an invite link (requires admin)
-  watch <name> [--interval <seconds>]                 Watch for new messages (default: 5s poll)
+  watch <name> [--interval <s>] [--keyword <w>] [--event new,edit]  Watch for messages
   get-message <name> <id> [<id>...]                   Fetch specific messages by ID
   scan <name> --from <id> --to <id>                   Scan a message ID range (IDscan)
   pin <name> <message-id> [--silent]                  Pin a message
@@ -85,6 +86,23 @@ Telegram:
   set-photo <name> <path>                             Set group/channel photo from file
   contacts                                            List your Telegram contacts
   contacts add <phone> <first-name> [<last-name>]    Add a contact by phone number
+  sessions                                            List active sessions
+  sessions revoke <hash>                             Terminate a session by hash
+  block <user>                                        Block a user
+  unblock <user>                                      Unblock a user
+  blocked                                             List blocked users
+  delete-history <name> [--revoke]                   Delete conversation history
+  archive <name>                                      Archive a dialog
+  unarchive <name>                                    Move dialog back from archive
+  message-link <name> <id>                           Generate t.me link to a message
+  delete-user-messages <chat> <user>                 Delete all messages from a user (channel/supergroup)
+  stats <name>                                        Channel/supergroup analytics
+  transcribe <name> <id>                             Voice-to-text transcription
+  restrict <chat> <user> [--no-send] [--no-media] [--no-web-preview] [--no-polls] [--until "..."]  Partial ban
+  create-channel <title> [--supergroup] [--username @slug]  Create broadcast channel or supergroup
+  search-members <group> <query> [--limit <n>]       Search members by name/username
+  parse-members <group> [--limit <n>] [--out file.csv] [--format json]  Export all members to CSV
+  active-members <group> [--days <n>] [--out file.json]  Members who wrote recently
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
@@ -207,19 +225,22 @@ func main() {
 
 	case "dialogs":
 		unread, rest := flagBool(args, "--unread")
-		limit, _ := flagInt(rest, "--limit", 0)
-		if err := cmdDialogs(c, unread, limit); err != nil {
+		archived, rest2 := flagBool(rest, "--archived")
+		limit, rest3 := flagInt(rest2, "--limit", 0)
+		typeFilter, _ := flagStr(rest3, "--type")
+		if err := cmdDialogs(c, unread, limit, typeFilter, archived); err != nil {
 			fatalf("%v", err)
 		}
 
 	case "read":
 		pos := positional(args)
 		if len(pos) == 0 {
-			fatalf("usage: tg-cli read <name> [--offset <n>] [--since <duration>] [--format text]")
+			fatalf("usage: tg-cli read <name> [--offset <n>] [--since <duration>] [--format text] [--media-only]")
 		}
 		offset, args2 := flagInt(args, "--offset", 0)
 		sinceStr, args3 := flagStr(args2, "--since")
-		format, _ := flagStr(args3, "--format")
+		format, args4 := flagStr(args3, "--format")
+		mediaOnly, _ := flagBool(args4, "--media-only")
 		var since time.Time
 		if sinceStr != "" {
 			var err error
@@ -228,16 +249,17 @@ func main() {
 				fatalf("%v", err)
 			}
 		}
-		if err := cmdRead(c, pos[0], offset, since, format); err != nil {
+		if err := cmdRead(c, pos[0], offset, since, format, mediaOnly); err != nil {
 			fatalf("%v", err)
 		}
 
 	case "send":
 		pos := positional(args)
 		if len(pos) < 2 {
-			fatalf("usage: tg-cli send <name> <text...> [--at \"YYYY-MM-DD HH:MM\"]")
+			fatalf("usage: tg-cli send <name> <text...> [--at \"YYYY-MM-DD HH:MM\"] [--parse-mode html|markdown]")
 		}
-		atStr, _ := flagStr(args, "--at")
+		atStr, args2 := flagStr(args, "--at")
+		parseMode, _ := flagStr(args2, "--parse-mode")
 		var scheduleAt time.Time
 		if atStr != "" {
 			t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
@@ -246,7 +268,7 @@ func main() {
 			}
 			scheduleAt = t
 		}
-		if err := cmdSend(c, pos[0], strings.Join(pos[1:], " "), scheduleAt); err != nil {
+		if err := cmdSend(c, pos[0], strings.Join(pos[1:], " "), scheduleAt, parseMode); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -413,10 +435,28 @@ func main() {
 	case "watch":
 		pos := positional(args)
 		if len(pos) == 0 {
-			fatalf("usage: tg-cli watch <name> [--interval <seconds>]")
+			fatalf("usage: tg-cli watch <name> [--interval <seconds>] [--keyword <word>] [--event new,edit]")
 		}
-		interval, _ := flagInt(args, "--interval", 5)
-		if err := cmdWatch(c, pos[0], interval); err != nil {
+		interval, args2 := flagInt(args, "--interval", 5)
+		kwStr, args3 := flagStr(args2, "--keyword")
+		evStr, _ := flagStr(args3, "--event")
+		var keywords []string
+		if kwStr != "" {
+			for _, kw := range strings.Split(kwStr, ",") {
+				if kw = strings.TrimSpace(kw); kw != "" {
+					keywords = append(keywords, kw)
+				}
+			}
+		}
+		var events []string
+		if evStr != "" {
+			for _, ev := range strings.Split(evStr, ",") {
+				if ev = strings.TrimSpace(ev); ev != "" {
+					events = append(events, ev)
+				}
+			}
+		}
+		if err := cmdWatch(c, pos[0], interval, keywords, events); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -731,6 +771,199 @@ func main() {
 			if err := cmdContacts(c); err != nil {
 				fatalf("%v", err)
 			}
+		}
+
+	case "send-album":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli send-album <name> <file1> [<file2>...]")
+		}
+		if err := cmdSendAlbum(c, pos[0], pos[1:]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "delete-user-messages":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli delete-user-messages <chat> <user>")
+		}
+		if err := cmdDeleteUserMessages(c, pos[0], pos[1]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "stats":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli stats <name>")
+		}
+		if err := cmdStats(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "transcribe":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli transcribe <name> <message-id>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdTranscribe(c, pos[0], msgID); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "restrict":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli restrict <chat> <user> [--no-send] [--no-media] [--no-stickers] [--no-web-preview] [--no-polls] [--no-change-info] [--no-invite] [--no-pin] [--until \"YYYY-MM-DD HH:MM\"]")
+		}
+		untilStr, _ := flagStr(args, "--until")
+		var until time.Time
+		if untilStr != "" {
+			t, err := time.ParseInLocation("2006-01-02 15:04", untilStr, time.Local)
+			if err != nil {
+				fatalf("--until: expected format \"YYYY-MM-DD HH:MM\", got %q", untilStr)
+			}
+			until = t
+		}
+		noSend, _ := flagBool(args, "--no-send")
+		noMedia, _ := flagBool(args, "--no-media")
+		noStickers, _ := flagBool(args, "--no-stickers")
+		noWebPreview, _ := flagBool(args, "--no-web-preview")
+		noPolls, _ := flagBool(args, "--no-polls")
+		noChangeInfo, _ := flagBool(args, "--no-change-info")
+		noInvite, _ := flagBool(args, "--no-invite")
+		noPin, _ := flagBool(args, "--no-pin")
+		if err := cmdRestrict(c, pos[0], pos[1], until, noSend, noMedia, noStickers, noWebPreview, noPolls, noChangeInfo, noInvite, noPin); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "create-channel":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli create-channel <title> [--supergroup] [--username @slug]")
+		}
+		isSupergroup, _ := flagBool(args, "--supergroup")
+		username, _ := flagStr(args, "--username")
+		if err := cmdCreateChannel(c, strings.Join(pos, " "), isSupergroup, username); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "sessions":
+		pos := positional(args)
+		if len(pos) > 0 && pos[0] == "revoke" {
+			if len(pos) < 2 {
+				fatalf("usage: tg-cli sessions revoke <hash>")
+			}
+			hash, err := strconv.ParseInt(pos[1], 10, 64)
+			if err != nil {
+				fatalf("invalid session hash %q: must be a number", pos[1])
+			}
+			if err := cmdSessionsRevoke(c, hash); err != nil {
+				fatalf("%v", err)
+			}
+		} else {
+			if err := cmdSessions(c); err != nil {
+				fatalf("%v", err)
+			}
+		}
+
+	case "block":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli block <user>")
+		}
+		if err := cmdBlock(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "unblock":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli unblock <user>")
+		}
+		if err := cmdUnblock(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "blocked":
+		if err := cmdBlocked(c); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "delete-history":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli delete-history <name> [--revoke]")
+		}
+		revoke, _ := flagBool(args, "--revoke")
+		if err := cmdDeleteHistory(c, pos[0], revoke); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "archive":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli archive <name>")
+		}
+		if err := cmdArchive(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "unarchive":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli unarchive <name>")
+		}
+		if err := cmdUnarchive(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "message-link":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli message-link <name> <message-id>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdMessageLink(c, pos[0], msgID); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "search-members":
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli search-members <group> <query> [--limit <n>]")
+		}
+		limit, _ := flagInt(args, "--limit", 50)
+		if err := cmdSearchMembers(c, pos[0], strings.Join(pos[1:], " "), limit); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "parse-members":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli parse-members <group> [--limit <n>] [--out <file>] [--format json]")
+		}
+		limit, args2 := flagInt(args, "--limit", 5000)
+		outFile, args3 := flagStr(args2, "--out")
+		format, _ := flagStr(args3, "--format")
+		if err := cmdParseMembers(c, pos[0], limit, outFile, format); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "active-members":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli active-members <group> [--days <n>] [--out <file>]")
+		}
+		days, args2 := flagInt(args, "--days", 30)
+		outFile, _ := flagStr(args2, "--out")
+		if err := cmdActiveMembers(c, pos[0], days, outFile); err != nil {
+			fatalf("%v", err)
 		}
 
 	default:
