@@ -57,7 +57,10 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 
 		for {
 			batchSize := 100
-			if limit > 0 {
+			if limit > 0 && typeFilter == "" {
+				// Only apply limit to raw fetch when no type filter is active.
+				// With a type filter we keep fetching until we have enough
+				// filtered results (see cutoff in the output loop below).
 				remaining := limit - len(allDialogs)
 				if remaining <= 0 {
 					break
@@ -170,7 +173,6 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 			if onlyUnread && dlg.UnreadCount == 0 {
 				continue
 			}
-			// type filter applied after info is filled below
 
 			info := dialogInfo{UnreadCount: dlg.UnreadCount}
 			switch p := dlg.Peer.(type) {
@@ -204,11 +206,15 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 			if info.Name == "" {
 				continue
 			}
-			// Apply --type filter
+			// Apply --type filter (client-side)
 			if typeFilter != "" && info.Type != typeFilter {
 				continue
 			}
 			out = append(out, info)
+			// Honour --limit when type filter is active (count filtered results)
+			if limit > 0 && typeFilter != "" && len(out) >= limit {
+				break
+			}
 		}
 		return printJSON(out)
 	})
@@ -2712,6 +2718,27 @@ func cmdContactsAdd(c config, phone, firstName, lastName string) error {
 			"first_name": u.FirstName,
 			"last_name":  u.LastName,
 		})
+	})
+}
+
+// cmdContactsDelete removes a contact. Accepts @username, phone, or numeric ID.
+func cmdContactsDelete(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		peer, err := resolvePeer(ctx, pm, api, name)
+		if err != nil {
+			return err
+		}
+		user, ok := peer.(peers.User)
+		if !ok {
+			return fmt.Errorf("contacts delete only works for users")
+		}
+		inputUser := user.InputUser()
+		_, err = api.ContactsDeleteContacts(ctx, []tg.InputUserClass{inputUser})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Removed contact %s\n", name)
+		return printJSON(map[string]any{"status": "deleted", "user": name})
 	})
 }
 
