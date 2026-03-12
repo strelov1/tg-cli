@@ -39,8 +39,8 @@ Auth (interactive):
 
 Telegram:
   me                                     Account info
-  dialogs [--unread] [--limit <n>] [--type user|channel|group] [--archived]  List dialogs
-  read <name> [--offset <n>] [--since <duration>] [--format text] [--media-only]  Read messages
+  dialogs [--unread] [--limit <n>] [--type user|channel|group] [--archived] [--since <d>]  List dialogs
+  read <name> [--offset <n>] [--since <duration>] [--format text] [--media-only] [--from-me]  Read messages
   export <name> [--limit <n>]                         Export full history (stdout JSON)
   send <name> <text...> [--at "YYYY-MM-DD HH:MM"] [--parse-mode html|markdown]  Send message
   send-file <name> <path>                             Send a file or document
@@ -104,6 +104,14 @@ Telegram:
   search-members <group> <query> [--limit <n>]       Search members by name/username
   parse-members <group> [--limit <n>] [--out file.csv] [--format json]  Export all members to CSV
   active-members <group> [--days <n>] [--out file.json]  Members who wrote recently
+  broadcast --file <path> --msg <text> [--delay 30s] [--limit <n>] [--parse-mode html|markdown]  Send to list
+  enrich --file <path> [--out enriched.json]         Enrich member list with username/bio/phone
+  mass-invite <group> --file <path> [--delay 60s] [--limit <n>]  Batch invite from file
+  set-profile [--name "First Last"] [--first-name <n>] [--last-name <n>] [--bio <text>] [--username <u>]
+  set-profile-photo <path>                           Set own profile photo
+  poll <target> <question> <opt1> <opt2> [...] [--anonymous] [--multiple]  Create a poll
+  schedule <name> <text...> --at "YYYY-MM-DD HH:MM"  Schedule a message (alias for send --at)
+  resolve <username|id>                              Resolve username ↔ numeric ID
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
@@ -228,8 +236,17 @@ func main() {
 		unread, rest := flagBool(args, "--unread")
 		archived, rest2 := flagBool(rest, "--archived")
 		limit, rest3 := flagInt(rest2, "--limit", 0)
-		typeFilter, _ := flagStr(rest3, "--type")
-		if err := cmdDialogs(c, unread, limit, typeFilter, archived); err != nil {
+		typeFilter, rest4 := flagStr(rest3, "--type")
+		sinceStr, _ := flagStr(rest4, "--since")
+		var sinceTime time.Time
+		if sinceStr != "" {
+			var err error
+			sinceTime, err = parseSince(sinceStr)
+			if err != nil {
+				fatalf("%v", err)
+			}
+		}
+		if err := cmdDialogs(c, unread, limit, typeFilter, archived, sinceTime); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -241,7 +258,8 @@ func main() {
 		offset, args2 := flagInt(args, "--offset", 0)
 		sinceStr, args3 := flagStr(args2, "--since")
 		format, args4 := flagStr(args3, "--format")
-		mediaOnly, _ := flagBool(args4, "--media-only")
+		mediaOnly, args5 := flagBool(args4, "--media-only")
+		fromMe, _ := flagBool(args5, "--from-me")
 		var since time.Time
 		if sinceStr != "" {
 			var err error
@@ -250,7 +268,7 @@ func main() {
 				fatalf("%v", err)
 			}
 		}
-		if err := cmdRead(c, pos[0], offset, since, format, mediaOnly); err != nil {
+		if err := cmdRead(c, pos[0], offset, since, format, mediaOnly, fromMe); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -971,6 +989,154 @@ func main() {
 		days, args2 := flagInt(args, "--days", 30)
 		outFile, _ := flagStr(args2, "--out")
 		if err := cmdActiveMembers(c, pos[0], days, outFile); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "broadcast":
+		fileArg, args2 := flagStr(args, "--file")
+		stdin, args3 := flagBool(args2, "--stdin")
+		msgArg, args4 := flagStr(args3, "--msg")
+		delayStr, args5 := flagStr(args4, "--delay")
+		limit, args6 := flagInt(args5, "--limit", 0)
+		parseMode, _ := flagStr(args6, "--parse-mode")
+		if stdin {
+			fileArg = "-"
+		}
+		if fileArg == "" {
+			fatalf("usage: tg-cli broadcast --file <path> --msg <text> [--delay 30s] [--limit <n>] [--parse-mode html|markdown]")
+		}
+		if msgArg == "" {
+			pos := positional(args)
+			if len(pos) > 0 {
+				msgArg = strings.Join(pos, " ")
+			}
+		}
+		if msgArg == "" {
+			fatalf("--msg is required")
+		}
+		var delay time.Duration
+		if delayStr != "" {
+			var err error
+			delay, err = parseDuration(delayStr)
+			if err != nil {
+				fatalf("%v", err)
+			}
+		}
+		if err := cmdBroadcast(c, fileArg, msgArg, delay, limit, parseMode); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "enrich":
+		fileArg, args2 := flagStr(args, "--file")
+		stdin, _ := flagBool(args2, "--stdin")
+		outFile, _ := flagStr(args, "--out")
+		if stdin {
+			fileArg = "-"
+		}
+		if fileArg == "" {
+			pos := positional(args)
+			if len(pos) > 0 {
+				fileArg = pos[0]
+			}
+		}
+		if fileArg == "" {
+			fatalf("usage: tg-cli enrich --file <path> [--out enriched.json]")
+		}
+		if err := cmdEnrich(c, fileArg, outFile); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "mass-invite":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli mass-invite <group> --file <path> [--delay 60s] [--limit <n>]")
+		}
+		fileArg, args2 := flagStr(args, "--file")
+		stdin, args3 := flagBool(args2, "--stdin")
+		delayStr, args4 := flagStr(args3, "--delay")
+		limit, _ := flagInt(args4, "--limit", 0)
+		if stdin {
+			fileArg = "-"
+		}
+		if fileArg == "" {
+			fatalf("--file is required")
+		}
+		var delay time.Duration
+		if delayStr != "" {
+			var err error
+			delay, err = parseDuration(delayStr)
+			if err != nil {
+				fatalf("%v", err)
+			}
+		}
+		if err := cmdMassInvite(c, pos[0], fileArg, delay, limit); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "set-profile":
+		firstName, _ := flagStr(args, "--first-name")
+		lastName, _ := flagStr(args, "--last-name")
+		bio, _ := flagStr(args, "--bio")
+		username, _ := flagStr(args, "--username")
+		// --name splits "First Last" into first + last
+		if name, _ := flagStr(args, "--name"); name != "" {
+			parts := strings.SplitN(name, " ", 2)
+			if firstName == "" {
+				firstName = parts[0]
+			}
+			if lastName == "" && len(parts) > 1 {
+				lastName = parts[1]
+			}
+		}
+		if err := cmdSetProfile(c, firstName, lastName, bio, username); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "set-profile-photo":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli set-profile-photo <path>")
+		}
+		if err := cmdSetProfilePhoto(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "poll":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli poll <target> <question> <option1> <option2> [<option3>...] [--anonymous] [--multiple]")
+		}
+		anonymous, _ := flagBool(args, "--anonymous")
+		multiple, _ := flagBool(args, "--multiple")
+		if err := cmdPoll(c, pos[0], pos[1], pos[2:], anonymous, multiple); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "resolve":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli resolve <username|id>")
+		}
+		if err := cmdResolve(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "schedule":
+		// Alias for: send <target> <text> --at "..."
+		pos := positional(args)
+		if len(pos) < 2 {
+			fatalf("usage: tg-cli schedule <name> <text...> --at \"YYYY-MM-DD HH:MM\"")
+		}
+		atStr, args2 := flagStr(args, "--at")
+		parseMode, _ := flagStr(args2, "--parse-mode")
+		if atStr == "" {
+			fatalf("--at is required for schedule")
+		}
+		t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
+		if err != nil {
+			fatalf("--at: expected format \"YYYY-MM-DD HH:MM\", got %q", atStr)
+		}
+		if err := cmdSend(c, pos[0], strings.Join(pos[1:], " "), t, parseMode); err != nil {
 			fatalf("%v", err)
 		}
 

@@ -170,6 +170,7 @@ type tgMsg struct {
 	ID         int            `json:"id"`
 	Who        string         `json:"who"`
 	WhoID      int64          `json:"who_id,omitempty"`
+	FromMe     bool           `json:"from_me,omitempty"`
 	When       string         `json:"when"`
 	Text       string         `json:"text"`
 	Views      int            `json:"views,omitempty"`
@@ -184,6 +185,7 @@ type tgMsgFull struct {
 	ID         int            `json:"id"`
 	Who        string         `json:"who,omitempty"`
 	WhoID      int64          `json:"who_id,omitempty"`
+	FromMe     bool           `json:"from_me,omitempty"`
 	When       string         `json:"when"`
 	Text       string         `json:"text,omitempty"`
 	MediaType  string         `json:"media_type,omitempty"`
@@ -203,9 +205,10 @@ func formatMessagesFull(msgs []tg.MessageClass, em entityMaps) []tgMsgFull {
 			continue
 		}
 		item := tgMsgFull{
-			ID:   msg.ID,
-			When: time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
-			Text: msg.Message,
+			ID:     msg.ID,
+			When:   time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
+			Text:   msg.Message,
+			FromMe: msg.Out,
 		}
 		if msg.FromID != nil {
 			item.Who = em.senderName(msg.FromID)
@@ -307,11 +310,12 @@ func formatMessages(msgs []tg.MessageClass, em entityMaps) []tgMsg {
 			senderIDVal = senderID(msg.FromID)
 		}
 		item := tgMsg{
-			ID:    msg.ID,
-			Who:   sender,
-			WhoID: senderIDVal,
-			When:  time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
-			Text:  text,
+			ID:     msg.ID,
+			Who:    sender,
+			WhoID:  senderIDVal,
+			FromMe: msg.Out,
+			When:   time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
+			Text:   text,
 		}
 		if v, ok := msg.GetViews(); ok {
 			item.Views = v
