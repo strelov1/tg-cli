@@ -249,6 +249,7 @@ tg-cli export team-chat --limit 500 > recent.json
 ```
 
 Export writes progress to stderr and JSON to stdout:
+
 ```json
 {
   "dialog": "team-chat",
@@ -264,7 +265,7 @@ Export writes progress to stderr and JSON to stdout:
       "forwards": 5,
       "reply_to": 41,
       "post_author": "Alice",
-      "reactions": [{"emoji": "👍", "count": 10}]
+      "reactions": [{ "emoji": "👍", "count": 10 }]
     }
   ]
 }
@@ -284,11 +285,11 @@ Sessions: `~/.tg-cli/sessions/<phone>/session.json`
 
 Environment variables (take priority over config file):
 
-| Variable | Description |
-|----------|-------------|
-| `TG_APP_ID` | App ID |
-| `TG_API_HASH` | API Hash |
-| `ACCOUNT` | Default phone number |
+| Variable      | Description            |
+| ------------- | ---------------------- |
+| `TG_APP_ID`   | App ID                 |
+| `TG_API_HASH` | API Hash               |
+| `ACCOUNT`     | Default phone number   |
 | `SESSION_DIR` | Directory for sessions |
 
 ## Agent usage examples

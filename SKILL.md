@@ -159,10 +159,11 @@ tg-cli dialogs --limit 50
 ```
 
 Output:
+
 ```json
 [
-  {"id": 123, "name": "Alice", "username": "alice", "type": "user", "unread_count": 3},
-  {"id": 456, "name": "Dev Team", "type": "supergroup", "unread_count": 0}
+  { "id": 123, "name": "Alice", "username": "alice", "type": "user", "unread_count": 3 },
+  { "id": 456, "name": "Dev Team", "type": "supergroup", "unread_count": 0 }
 ]
 ```
 
@@ -183,8 +184,23 @@ tg-cli read team-chat --format text       # human-readable: [2024-01-01T10:00:00
 ```
 
 Output:
+
 ```json
-{"messages": [{"id": 1, "who": "Alice", "when": "2024-01-01T10:00:00Z", "text": "Hello", "views": 100, "forwards": 2, "reply_to": 0, "reactions": [{"emoji": "👍", "count": 5}]}], "offset": 1}
+{
+  "messages": [
+    {
+      "id": 1,
+      "who": "Alice",
+      "when": "2024-01-01T10:00:00Z",
+      "text": "Hello",
+      "views": 100,
+      "forwards": 2,
+      "reply_to": 0,
+      "reactions": [{ "emoji": "👍", "count": 5 }]
+    }
+  ],
+  "offset": 1
+}
 ```
 
 Use `offset` value from response as `--offset` to load older messages.
@@ -251,8 +267,14 @@ tg-cli reactions team-chat 12345
 ```
 
 Output:
+
 ```json
-{"reactions": [{"emoji": "👍", "count": 10}, {"emoji": "❤️", "count": 3}]}
+{
+  "reactions": [
+    { "emoji": "👍", "count": 10 },
+    { "emoji": "❤️", "count": 3 }
+  ]
+}
 ```
 
 ### Forward a message
@@ -315,6 +337,7 @@ tg-cli search team-chat "deploy" --limit 20
 ```
 
 Output:
+
 ```json
 {"results": [...], "total": 5, "query": "deploy", "dialog": "team-chat"}
 ```
@@ -326,6 +349,7 @@ tg-cli search-all "deployment failed" --limit 20
 ```
 
 Output:
+
 ```json
 {"results": [...], "total": 3, "query": "deployment failed"}
 ```
@@ -352,8 +376,9 @@ tg-cli admins team-chat
 ```
 
 Output:
+
 ```json
-{"admins": [{"id": 1, "username": "alice", "first_name": "Alice", "role": "creator"}]}
+{ "admins": [{ "id": 1, "username": "alice", "first_name": "Alice", "role": "creator" }] }
 ```
 
 ### List forum topics
@@ -369,8 +394,9 @@ tg-cli invite-link team-chat
 ```
 
 Output:
+
 ```json
-{"link": "https://t.me/+AbCdEfGhIjK"}
+{ "link": "https://t.me/+AbCdEfGhIjK" }
 ```
 
 ### Invite a user into a group
@@ -507,13 +533,16 @@ tg-cli export team-chat --limit 500 > recent.json
 ```
 
 Progress is printed to stderr. Output:
+
 ```json
 {
   "account": "+12025551234",
   "dialog": "team-chat",
   "total_messages": 1234,
   "incomplete": false,
-  "messages": [{"id": 1, "who": "Alice", "when": "...", "text": "...", "views": 100, "forwards": 2}]
+  "messages": [
+    { "id": 1, "who": "Alice", "when": "...", "text": "...", "views": 100, "forwards": 2 }
+  ]
 }
 ```
 
@@ -529,6 +558,7 @@ tg-cli --account +79001234567 send @alice "Hello from my Russian number"
 ```
 
 Set a default account:
+
 ```bash
 tg-cli accounts use +12025551234
 ```
@@ -559,10 +589,10 @@ tg-cli config set default-account +12025551234
 
 ## Common Errors
 
-| Error | Meaning | Fix |
-|-------|---------|-----|
-| `app-id and api-hash are required` | Not configured | `tg-cli config set app-id ...` |
-| `auth code expired` | 5-min TTL on code | Re-run `auth-request` |
-| `2FA required` | User has 2FA | Re-run `auth-complete` with `--password` |
-| `cannot find "..."` | Unknown dialog name | Try `@username` format or full name |
-| `session invalid or expired` | Session gone | Re-authorize with `auth-request` / `auth-complete` |
+| Error                              | Meaning             | Fix                                                |
+| ---------------------------------- | ------------------- | -------------------------------------------------- |
+| `app-id and api-hash are required` | Not configured      | `tg-cli config set app-id ...`                     |
+| `auth code expired`                | 5-min TTL on code   | Re-run `auth-request`                              |
+| `2FA required`                     | User has 2FA        | Re-run `auth-complete` with `--password`           |
+| `cannot find "..."`                | Unknown dialog name | Try `@username` format or full name                |
+| `session invalid or expired`       | Session gone        | Re-authorize with `auth-request` / `auth-complete` |
