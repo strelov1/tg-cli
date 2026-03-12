@@ -595,32 +595,31 @@ tg-cli config set default-account +12025551234
 
 ## Quick Reference
 
-| Action               | Command                                                         |
-| -------------------- | --------------------------------------------------------------- |
-| Search members       | `tg-cli search-members <group> <query>`                         |
-| Export members CSV   | `tg-cli parse-members <group> [--limit <n>] [--out file.csv]`   |
-| Active members       | `tg-cli active-members <group> [--days <n>]`                    |
-| Channel stats        | `tg-cli stats <name>`                                           |
-| Transcribe voice     | `tg-cli transcribe <name> <id>`                                 |
-| Restrict user        | `tg-cli restrict <group> <user> [--no-send] [--no-media]`       |
-| Delete user messages | `tg-cli delete-user-messages <chat> <user>`                     |
-| Create channel       | `tg-cli create-channel <title> [--supergroup] [--username @x]`  |
-| List sessions        | `tg-cli sessions`                                               |
-| Revoke session       | `tg-cli sessions revoke <hash>`                                 |
-| Block user           | `tg-cli block <user>`                                           |
-| Unblock user         | `tg-cli unblock <user>`                                         |
+| Action               | Command                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| Search members       | `tg-cli search-members <group> <query>`                        |
+| Export members CSV   | `tg-cli parse-members <group> [--limit <n>] [--out file.csv]`  |
+| Active members       | `tg-cli active-members <group> [--days <n>]`                   |
+| Channel stats        | `tg-cli stats <name>`                                          |
+| Transcribe voice     | `tg-cli transcribe <name> <id>`                                |
+| Restrict user        | `tg-cli restrict <group> <user> [--no-send] [--no-media]`      |
+| Delete user messages | `tg-cli delete-user-messages <chat> <user>`                    |
+| Create channel       | `tg-cli create-channel <title> [--supergroup] [--username @x]` |
+| List sessions        | `tg-cli sessions`                                              |
+| Revoke session       | `tg-cli sessions revoke <hash>`                                |
+| Block user           | `tg-cli block <user>`                                          |
+| Unblock user         | `tg-cli unblock <user>`                                        |
 | List blocked         | `tg-cli blocked`                                               |
-| Delete history       | `tg-cli delete-history <name> [--revoke]`                       |
-| Archive dialog       | `tg-cli archive <name>`                                         |
-| Unarchive dialog     | `tg-cli unarchive <name>`                                       |
-| Message link         | `tg-cli message-link <name> <id>`                               |
-| Send album           | `tg-cli send-album <name> <file1> [<file2>...]`                 |
-| Send with HTML/MD    | `tg-cli send <name> <text> --parse-mode html\|markdown`         |
-| Watch with filter    | `tg-cli watch <name> [--keyword <w>] [--event new,edit]`        |
-| Read media only      | `tg-cli read <name> --media-only`                               |
-| Read in text format  | `tg-cli read <name> --format text`                              |
-| Filter dialogs       | `tg-cli dialogs [--type user\|channel\|group] [--archived]`     |
-
+| Delete history       | `tg-cli delete-history <name> [--revoke]`                      |
+| Archive dialog       | `tg-cli archive <name>`                                        |
+| Unarchive dialog     | `tg-cli unarchive <name>`                                      |
+| Message link         | `tg-cli message-link <name> <id>`                              |
+| Send album           | `tg-cli send-album <name> <file1> [<file2>...]`                |
+| Send with HTML/MD    | `tg-cli send <name> <text> --parse-mode html\|markdown`        |
+| Watch with filter    | `tg-cli watch <name> [--keyword <w>] [--event new,edit]`       |
+| Read media only      | `tg-cli read <name> --media-only`                              |
+| Read in text format  | `tg-cli read <name> --format text`                             |
+| Filter dialogs       | `tg-cli dialogs [--type user\|channel\|group] [--archived]`    |
 
 ## Common Errors
 

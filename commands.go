@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"os"
 	"path/filepath"
@@ -36,7 +38,7 @@ func cmdMe(c config) error {
 	})
 }
 
-func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archived bool) error {
+func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archived bool, since time.Time) error {
 	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		// Accumulated entity maps across pages
 		usersMap := make(map[int64]*tg.User)
@@ -44,6 +46,8 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 		channelsMap := make(map[int64]*tg.Channel)
 
 		var allDialogs []tg.DialogClass
+		// topMsgDate maps topMessage ID → unix timestamp (for --since filter)
+		topMsgDate := make(map[int]int)
 
 		offsetDate := 0
 		offsetID := 0
@@ -116,6 +120,13 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 			}
 			allDialogs = append(allDialogs, dialogs...)
 
+			// Collect top message dates for --since filter
+			for _, m := range messages {
+				if msg, ok := m.(*tg.Message); ok {
+					topMsgDate[msg.ID] = msg.Date
+				}
+			}
+
 			if done {
 				break
 			}
@@ -164,6 +175,11 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 			Members     int    `json:"members,omitempty"`
 		}
 
+		sinceCutoff := int64(0)
+		if !since.IsZero() {
+			sinceCutoff = since.Unix()
+		}
+
 		var out []dialogInfo
 		for _, d := range allDialogs {
 			dlg, ok := d.(*tg.Dialog)
@@ -172,6 +188,12 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 			}
 			if onlyUnread && dlg.UnreadCount == 0 {
 				continue
+			}
+			// --since filter: skip dialogs whose top message is older than cutoff
+			if sinceCutoff > 0 {
+				if date, ok := topMsgDate[dlg.TopMessage]; !ok || int64(date) < sinceCutoff {
+					continue
+				}
 			}
 
 			info := dialogInfo{UnreadCount: dlg.UnreadCount}
@@ -220,7 +242,7 @@ func cmdDialogs(c config, onlyUnread bool, limit int, typeFilter string, archive
 	})
 }
 
-func cmdRead(c config, name string, offsetID int, since time.Time, format string, mediaOnly bool) error {
+func cmdRead(c config, name string, offsetID int, since time.Time, format string, mediaOnly bool, fromMe bool) error {
 	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, api, name)
 		if err != nil {
@@ -228,7 +250,7 @@ func cmdRead(c config, name string, offsetID int, since time.Time, format string
 		}
 
 		if !since.IsZero() {
-			return readSince(ctx, api, p, since, format, mediaOnly)
+			return readSince(ctx, api, p, since, format, mediaOnly, fromMe)
 		}
 
 		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
@@ -253,6 +275,17 @@ func cmdRead(c config, name string, offsetID int, since time.Time, format string
 			if last, ok := msgs[len(msgs)-1].(*tg.Message); ok {
 				offset = last.ID
 			}
+		}
+
+		// apply --from-me filter before media/text formatting
+		if fromMe {
+			var mine []tg.MessageClass
+			for _, m := range msgs {
+				if msg, ok := m.(*tg.Message); ok && msg.Out {
+					mine = append(mine, m)
+				}
+			}
+			msgs = mine
 		}
 
 		if mediaOnly {
@@ -291,7 +324,7 @@ func printMessagesText(msgs []tgMsg) {
 }
 
 // readSince fetches all messages newer than the cutoff time (paginating as needed).
-func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Time, format string, mediaOnly bool) error {
+func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Time, format string, mediaOnly bool, fromMe bool) error {
 	cutoff := int(since.Unix())
 	var all []tgMsg
 	var allFull []tgMsgFull
@@ -324,6 +357,9 @@ func readSince(ctx context.Context, api *tg.Client, p peers.Peer, since time.Tim
 			if msg.Date < cutoff {
 				done = true
 				break
+			}
+			if fromMe && !msg.Out {
+				continue
 			}
 			if mediaOnly {
 				if msg.Media == nil {
@@ -3956,6 +3992,408 @@ func cmdActiveMembers(c config, name string, days int, outFile string) error {
 			enc := json.NewEncoder(f)
 			enc.SetIndent("", "  ")
 			return enc.Encode(result)
+		}
+		return printJSON(result)
+	})
+}
+
+// ── readTargetsFromFile ──────────────────────────────────────────────────────
+
+// readTargetsFromFile reads one target (username/ID) per line.
+// Pass "-" as file to read from stdin.
+func readTargetsFromFile(file string) ([]string, error) {
+	var r io.Reader
+	if file == "-" {
+		r = os.Stdin
+	} else {
+		f, err := os.Open(file)
+		if err != nil {
+			return nil, fmt.Errorf("open %q: %w", file, err)
+		}
+		defer f.Close()
+		r = f
+	}
+	scanner := bufio.NewScanner(r)
+	var out []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out, scanner.Err()
+}
+
+// ── broadcast ────────────────────────────────────────────────────────────────
+
+func cmdBroadcast(c config, file, msg string, delay time.Duration, limit int, parseMode string) error {
+	targets, err := readTargetsFromFile(file)
+	if err != nil {
+		return err
+	}
+	if limit > 0 && len(targets) > limit {
+		targets = targets[:limit]
+	}
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		type bcastResult struct {
+			Target string `json:"target"`
+			Status string `json:"status"`
+			MsgID  int    `json:"msg_id,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}
+		msgText := msg
+		var entities []tg.MessageEntityClass
+		switch strings.ToLower(parseMode) {
+		case "html":
+			msgText, entities = parseHTMLEntities(msg)
+		case "markdown", "md":
+			msgText, entities = parseMarkdownEntities(msg)
+		}
+		var results []bcastResult
+		for i, target := range targets {
+			if i > 0 && delay > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+				}
+			}
+			peer, rerr := resolvePeer(ctx, pm, api, target)
+			if rerr != nil {
+				results = append(results, bcastResult{Target: target, Status: "error", Error: rerr.Error()})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: error: %v\n", i+1, len(targets), target, rerr)
+				continue
+			}
+			req := &tg.MessagesSendMessageRequest{
+				Peer:     peer.InputPeer(),
+				Message:  msgText,
+				RandomID: cryptoRandInt63(),
+			}
+			if len(entities) > 0 {
+				req.Entities = entities
+			}
+			upds, serr := api.MessagesSendMessage(ctx, req)
+			if serr != nil {
+				results = append(results, bcastResult{Target: target, Status: "error", Error: serr.Error()})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: error: %v\n", i+1, len(targets), target, serr)
+				continue
+			}
+			msgID := 0
+			if u, ok := upds.(*tg.Updates); ok {
+				for _, upd := range u.Updates {
+					if mu, ok2 := upd.(*tg.UpdateMessageID); ok2 {
+						msgID = mu.ID
+						break
+					}
+				}
+			}
+			results = append(results, bcastResult{Target: target, Status: "ok", MsgID: msgID})
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s: sent\n", i+1, len(targets), target)
+		}
+		sent := 0
+		for _, r := range results {
+			if r.Status == "ok" {
+				sent++
+			}
+		}
+		return printJSON(map[string]any{
+			"sent":    sent,
+			"failed":  len(results) - sent,
+			"total":   len(results),
+			"results": results,
+		})
+	})
+}
+
+// ── enrich ───────────────────────────────────────────────────────────────────
+
+func cmdEnrich(c config, file, outFile string) error {
+	targets, err := readTargetsFromFile(file)
+	if err != nil {
+		return err
+	}
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		type enrichedMember struct {
+			ID        int64  `json:"id"`
+			Username  string `json:"username,omitempty"`
+			FirstName string `json:"first_name,omitempty"`
+			LastName  string `json:"last_name,omitempty"`
+			Phone     string `json:"phone,omitempty"`
+			Bio       string `json:"bio,omitempty"`
+			Error     string `json:"error,omitempty"`
+		}
+		var results []enrichedMember
+		for i, target := range targets {
+			peer, rerr := resolvePeer(ctx, pm, api, target)
+			if rerr != nil {
+				results = append(results, enrichedMember{Error: rerr.Error()})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: %v\n", i+1, len(targets), target, rerr)
+				continue
+			}
+			user, ok := peer.(peers.User)
+			if !ok {
+				results = append(results, enrichedMember{Error: "not a user"})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: not a user\n", i+1, len(targets), target)
+				continue
+			}
+			raw := user.Raw()
+			item := enrichedMember{
+				ID:        raw.ID,
+				Username:  raw.Username,
+				FirstName: raw.FirstName,
+				LastName:  raw.LastName,
+				Phone:     raw.Phone,
+			}
+			if full, ferr := api.UsersGetFullUser(ctx, user.InputUser()); ferr == nil {
+				item.Bio = full.FullUser.About
+			}
+			results = append(results, item)
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s: ok\n", i+1, len(targets), target)
+		}
+		out := map[string]any{
+			"count":   len(results),
+			"members": results,
+		}
+		if outFile != "" {
+			f, ferr := os.Create(outFile)
+			if ferr != nil {
+				return fmt.Errorf("create output file: %w", ferr)
+			}
+			defer f.Close()
+			enc := json.NewEncoder(f)
+			enc.SetIndent("", "  ")
+			return enc.Encode(out)
+		}
+		return printJSON(out)
+	})
+}
+
+// ── mass-invite ───────────────────────────────────────────────────────────────
+
+func cmdMassInvite(c config, group, file string, delay time.Duration, limit int) error {
+	targets, err := readTargetsFromFile(file)
+	if err != nil {
+		return err
+	}
+	if limit > 0 && len(targets) > limit {
+		targets = targets[:limit]
+	}
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		grpPeer, err := resolvePeer(ctx, pm, api, group)
+		if err != nil {
+			return fmt.Errorf("resolve group: %w", err)
+		}
+		type invResult struct {
+			Target string `json:"target"`
+			Status string `json:"status"`
+			Error  string `json:"error,omitempty"`
+		}
+		var results []invResult
+		for i, target := range targets {
+			if i > 0 && delay > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+				}
+			}
+			userPeer, rerr := resolvePeer(ctx, pm, api, target)
+			if rerr != nil {
+				results = append(results, invResult{Target: target, Status: "error", Error: rerr.Error()})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: %v\n", i+1, len(targets), target, rerr)
+				continue
+			}
+			user, ok := userPeer.(peers.User)
+			if !ok {
+				results = append(results, invResult{Target: target, Status: "error", Error: "not a user"})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: not a user\n", i+1, len(targets), target)
+				continue
+			}
+			var invErr error
+			switch ch := grpPeer.(type) {
+			case peers.Channel:
+				_, invErr = api.ChannelsInviteToChannel(ctx, &tg.ChannelsInviteToChannelRequest{
+					Channel: ch.InputChannel(),
+					Users:   []tg.InputUserClass{user.InputUser()},
+				})
+			case peers.Chat:
+				_, invErr = api.MessagesAddChatUser(ctx, &tg.MessagesAddChatUserRequest{
+					ChatID:   ch.Raw().ID,
+					UserID:   user.InputUser(),
+					FwdLimit: 100,
+				})
+			default:
+				invErr = fmt.Errorf("target must be a channel or group")
+			}
+			if invErr != nil {
+				results = append(results, invResult{Target: target, Status: "error", Error: invErr.Error()})
+				fmt.Fprintf(os.Stderr, "[%d/%d] %s: %v\n", i+1, len(targets), target, invErr)
+				continue
+			}
+			results = append(results, invResult{Target: target, Status: "ok"})
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s: invited\n", i+1, len(targets), target)
+		}
+		invited := 0
+		for _, r := range results {
+			if r.Status == "ok" {
+				invited++
+			}
+		}
+		return printJSON(map[string]any{
+			"invited": invited,
+			"failed":  len(results) - invited,
+			"total":   len(results),
+			"results": results,
+		})
+	})
+}
+
+// ── set-profile ───────────────────────────────────────────────────────────────
+
+func cmdSetProfile(c config, firstName, lastName, bio, username string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		if firstName == "" && lastName == "" && bio == "" && username == "" {
+			return fmt.Errorf("specify at least one of --first-name, --last-name, --bio, --username")
+		}
+		if firstName != "" || lastName != "" || bio != "" {
+			req := &tg.AccountUpdateProfileRequest{}
+			if firstName != "" {
+				req.SetFirstName(firstName)
+			}
+			if lastName != "" {
+				req.SetLastName(lastName)
+			}
+			if bio != "" {
+				req.SetAbout(bio)
+			}
+			if _, err := api.AccountUpdateProfile(ctx, req); err != nil {
+				return fmt.Errorf("update profile: %w", err)
+			}
+		}
+		if username != "" {
+			u := strings.TrimPrefix(username, "@")
+			if _, err := api.AccountUpdateUsername(ctx, u); err != nil {
+				return fmt.Errorf("update username: %w", err)
+			}
+		}
+		self, err := client.Self(ctx)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{
+			"status":     "updated",
+			"id":         self.ID,
+			"username":   self.Username,
+			"first_name": self.FirstName,
+			"last_name":  self.LastName,
+		})
+	})
+}
+
+// ── set-profile-photo ─────────────────────────────────────────────────────────
+
+func cmdSetProfilePhoto(c config, path string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open file: %w", err)
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		u := uploader.NewUploader(api)
+		uploaded, err := u.Upload(ctx, uploader.NewUpload(filepath.Base(path), f, fi.Size()))
+		if err != nil {
+			return fmt.Errorf("upload: %w", err)
+		}
+		_, err = api.PhotosUploadProfilePhoto(ctx, &tg.PhotosUploadProfilePhotoRequest{
+			File: uploaded,
+		})
+		if err != nil {
+			return fmt.Errorf("set profile photo: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "Profile photo updated")
+		return printJSON(map[string]any{"status": "updated"})
+	})
+}
+
+// ── poll ──────────────────────────────────────────────────────────────────────
+
+func cmdPoll(c config, target, question string, options []string, anonymous, multiple bool) error {
+	if len(options) < 2 {
+		return fmt.Errorf("a poll requires at least 2 options")
+	}
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		peer, err := resolvePeer(ctx, pm, api, target)
+		if err != nil {
+			return err
+		}
+		var answers []tg.PollAnswer
+		for i, opt := range options {
+			answers = append(answers, tg.PollAnswer{
+				Text:   tg.TextWithEntities{Text: opt},
+				Option: []byte{byte(i + 1)},
+			})
+		}
+		poll := tg.Poll{
+			ID:             cryptoRandInt63(),
+			Question:       tg.TextWithEntities{Text: question},
+			Answers:        answers,
+			PublicVoters:   !anonymous,
+			MultipleChoice: multiple,
+		}
+		_, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer:     peer.InputPeer(),
+			Media:    &tg.InputMediaPoll{Poll: poll},
+			RandomID: cryptoRandInt63(),
+		})
+		if err != nil {
+			return fmt.Errorf("send poll: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "Poll sent")
+		return printJSON(map[string]any{
+			"status":   "sent",
+			"question": question,
+			"options":  options,
+		})
+	})
+}
+
+// ── resolve ───────────────────────────────────────────────────────────────────
+
+func cmdResolve(c config, query string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		peer, err := resolvePeer(ctx, pm, api, query)
+		if err != nil {
+			return err
+		}
+		result := map[string]any{}
+		switch p := peer.(type) {
+		case peers.User:
+			raw := p.Raw()
+			result["type"] = "user"
+			result["id"] = raw.ID
+			result["username"] = raw.Username
+			result["first_name"] = raw.FirstName
+			result["last_name"] = raw.LastName
+			result["phone"] = raw.Phone
+		case peers.Channel:
+			raw := p.Raw()
+			t := "channel"
+			if raw.Megagroup {
+				t = "supergroup"
+			}
+			result["type"] = t
+			result["id"] = raw.ID
+			result["username"] = raw.Username
+			result["title"] = raw.Title
+		case peers.Chat:
+			raw := p.Raw()
+			result["type"] = "group"
+			result["id"] = raw.ID
+			result["title"] = raw.Title
 		}
 		return printJSON(result)
 	})
