@@ -86,6 +86,7 @@ Telegram:
   set-photo <name> <path>                             Set group/channel photo from file
   contacts                                            List your Telegram contacts
   contacts add <phone> <first-name> [<last-name>]    Add a contact by phone number
+  contacts delete <user>                              Remove a contact
   sessions                                            List active sessions
   sessions revoke <hash>                             Terminate a session by hash
   block <user>                                        Block a user
@@ -765,6 +766,13 @@ func main() {
 				lastName = pos[3]
 			}
 			if err := cmdContactsAdd(c, pos[1], pos[2], lastName); err != nil {
+				fatalf("%v", err)
+			}
+		} else if len(pos) > 0 && (pos[0] == "delete" || pos[0] == "remove") {
+			if len(pos) < 2 {
+				fatalf("usage: tg-cli contacts delete <user>")
+			}
+			if err := cmdContactsDelete(c, pos[1]); err != nil {
 				fatalf("%v", err)
 			}
 		} else {

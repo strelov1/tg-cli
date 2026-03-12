@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(brew list:*)",
+      "Bash(brew install:*)",
+      "Bash(sudo xcodebuild:*)",
+      "Bash(unar:*)",
+      "Bash(uv venv:*)",
+      "Bash(/tmp/tg-convert/bin/pip install:*)",
+      "Bash(/tmp/tg-convert/bin/python:*)",
+      "Bash(python3 -c \"\nfrom opentele.td import tdesktop as td\nprint\\(''kDefaultKeyFile:'', td.TDesktop.kDefaultKeyFile\\)\n\" /tmp/tg-convert/bin/python -c \"\nfrom opentele.td import TDesktop\nprint\\(''default keyFile:'', TDesktop.kDefaultKeyFile\\)\n\")",
+      "Bash(__NEW_LINE_f212d70ed1128f4f__ /tmp/tg-convert/bin/python -c \"\nfrom opentele.td import TDesktop\nprint\\(''default keyFile:'', TDesktop.kDefaultKeyFile\\)\n\")",
+      "Bash(./tg-cli status:*)",
+      "Bash(TG_APP_ID=2040 TG_API_HASH=b18441a1ff607e10a989891a5462e627 ./tg-cli:*)",
+      "Bash(./tg-cli dialogs:*)",
+      "Bash(./tg-cli read:*)",
+      "Bash(python3:*)",
+      "Bash(while read username)",
+      "Bash(do)",
+      "Bash(echo:*)",
+      "Bash(./tg-cli info:*)",
+      "Bash(done)",
+      "Bash(for username in javmmsub03byjavburma hdchannel24 redxtv02 shweMM2Dlive mgkaung400 SarBalGyiMovies20 poepoe190 MWD777Vip2D)",
+      "Bash(do ./tg-cli info \"@$username\" --account +959663043674)",
+      "Bash(./tg-cli:*)",
+      "Bash(then)"
+    ]
+  }
+}

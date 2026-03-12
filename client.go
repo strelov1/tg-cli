@@ -417,7 +417,21 @@ func resolveIDViaDialogs(ctx context.Context, pm *peers.Manager, api *tg.Client,
 		}
 	}
 
-	return nil, fmt.Errorf("peer with ID %d not found in recent dialogs (try @username)", id)
+	// Fallback: search contacts list for a user with this ID.
+	contacts, cerr := api.ContactsGetContacts(ctx, 0)
+	if cerr == nil {
+		if cc, ok := contacts.(*tg.ContactsContacts); ok {
+			if cerr2 := pm.Apply(ctx, cc.Users, nil); cerr2 == nil {
+				for _, u := range cc.Users {
+					if usr, ok2 := u.(*tg.User); ok2 && usr.ID == id {
+						return pm.User(usr), nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("peer with ID %d not found in recent dialogs or contacts (try @username)", id)
 }
 
 // extractInviteHash extracts the hash from a t.me invite link.
