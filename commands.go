@@ -1988,6 +1988,45 @@ func cmdInviteLink(c config, name string) error {
 	})
 }
 
+// cmdPaidInviteLink creates a Telegram Stars subscription invite link.
+// Joining users must pay `stars` Stars every 30 days to retain access.
+func cmdPaidInviteLink(c config, name string, stars int64, title string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, api, name)
+		if err != nil {
+			return err
+		}
+		req := &tg.MessagesExportChatInviteRequest{
+			Peer: p.InputPeer(),
+			SubscriptionPricing: tg.StarsSubscriptionPricing{
+				Period: 30 * 24 * 60 * 60,
+				Amount: stars,
+			},
+		}
+		req.SetSubscriptionPricing(req.SubscriptionPricing)
+		if title != "" {
+			req.SetTitle(title)
+		}
+		result, err := api.MessagesExportChatInvite(ctx, req)
+		if err != nil {
+			return err
+		}
+		inv, ok := result.(*tg.ChatInviteExported)
+		if !ok {
+			return fmt.Errorf("unexpected result type: %T", result)
+		}
+		return printJSON(map[string]any{
+			"link":             inv.Link,
+			"stars_per_month":  stars,
+			"period_seconds":   30 * 24 * 60 * 60,
+			"title":            title,
+			"permanent":        inv.Permanent,
+			"revoked":          inv.Revoked,
+			"request_needed":   inv.RequestNeeded,
+		})
+	})
+}
+
 // cmdInvite invites a user or bot to a group/channel.
 // groupName may be a username, dialog name, or a raw numeric chat ID for regular groups.
 func cmdInvite(c config, groupName, userName string) error {
@@ -3090,7 +3129,9 @@ func parseMarkdownEntities(input string) (string, []tg.MessageEntityClass) {
 // ── send-album ───────────────────────────────────────────────────────────────
 
 // cmdSendAlbum uploads multiple files and sends them as a grouped media album.
-func cmdSendAlbum(c config, name string, filePaths []string) error {
+// caption is attached to the first media (shown above the album).
+// spoiler=true marks every photo/video as spoilered (blurred until tap).
+func cmdSendAlbum(c config, name string, filePaths []string, caption string, spoiler bool, scheduleAt time.Time) error {
 	if len(filePaths) == 0 {
 		return fmt.Errorf("at least one file is required")
 	}
@@ -3103,7 +3144,7 @@ func cmdSendAlbum(c config, name string, filePaths []string) error {
 		u := uploader.NewUploader(api)
 		var media []tg.InputSingleMedia
 
-		for _, path := range filePaths {
+		for i, path := range filePaths {
 			f, err := os.Open(path)
 			if err != nil {
 				return fmt.Errorf("open %s: %w", path, err)
@@ -3125,35 +3166,120 @@ func cmdSendAlbum(c config, name string, filePaths []string) error {
 				mimeType = "application/octet-stream"
 			}
 
-			var inputMedia tg.InputMediaClass
+			var uploadedMedia tg.InputMediaClass
 			if strings.HasPrefix(mimeType, "image/") && !strings.HasSuffix(strings.ToLower(path), ".gif") {
-				inputMedia = &tg.InputMediaUploadedPhoto{File: uploaded}
+				uploadedMedia = &tg.InputMediaUploadedPhoto{File: uploaded, Spoiler: spoiler}
 			} else {
-				inputMedia = &tg.InputMediaUploadedDocument{
-					File:     uploaded,
-					MimeType: mimeType,
-					Attributes: []tg.DocumentAttributeClass{
-						&tg.DocumentAttributeFilename{FileName: filepath.Base(path)},
-					},
+				attrs := []tg.DocumentAttributeClass{
+					&tg.DocumentAttributeFilename{FileName: filepath.Base(path)},
+				}
+				// Detect video so it shows as inline player (with autoplay) rather than as a file.
+				if strings.HasPrefix(mimeType, "video/") {
+					if w, h, dur, ok := probeVideo(path); ok {
+						attrs = append(attrs, &tg.DocumentAttributeVideo{
+							W:                 w,
+							H:                 h,
+							Duration:          dur,
+							SupportsStreaming: true,
+						})
+					}
+				}
+				uploadedMedia = &tg.InputMediaUploadedDocument{
+					File:       uploaded,
+					MimeType:   mimeType,
+					Spoiler:    spoiler,
+					Attributes: attrs,
 				}
 			}
 
-			media = append(media, tg.InputSingleMedia{
-				Media:    inputMedia,
-				RandomID: cryptoRandInt63(),
+			// Albums require resolved photo/document IDs, not raw uploads.
+			// Round-trip through MessagesUploadMedia so we get an InputMediaPhoto/Document we can group.
+			res, err := api.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+				Peer:  peer.InputPeer(),
+				Media: uploadedMedia,
 			})
+			if err != nil {
+				return fmt.Errorf("upload-media %s: %w", path, err)
+			}
+
+			var groupedMedia tg.InputMediaClass
+			switch m := res.(type) {
+			case *tg.MessageMediaPhoto:
+				p, ok := m.Photo.(*tg.Photo)
+				if !ok {
+					return fmt.Errorf("%s: unexpected photo type %T", path, m.Photo)
+				}
+				groupedMedia = &tg.InputMediaPhoto{
+					ID:      &tg.InputPhoto{ID: p.ID, AccessHash: p.AccessHash, FileReference: p.FileReference},
+					Spoiler: spoiler,
+				}
+			case *tg.MessageMediaDocument:
+				d, ok := m.Document.(*tg.Document)
+				if !ok {
+					return fmt.Errorf("%s: unexpected document type %T", path, m.Document)
+				}
+				groupedMedia = &tg.InputMediaDocument{
+					ID:      &tg.InputDocument{ID: d.ID, AccessHash: d.AccessHash, FileReference: d.FileReference},
+					Spoiler: spoiler,
+				}
+			default:
+				return fmt.Errorf("%s: unexpected uploadMedia result %T", path, res)
+			}
+
+			single := tg.InputSingleMedia{
+				Media:    groupedMedia,
+				RandomID: cryptoRandInt63(),
+			}
+			if i == 0 && caption != "" {
+				single.Message = caption
+			}
+			media = append(media, single)
 			fmt.Fprintf(os.Stderr, "Uploaded %s\n", filepath.Base(path))
 		}
 
-		_, err = api.MessagesSendMultiMedia(ctx, &tg.MessagesSendMultiMediaRequest{
+		req := &tg.MessagesSendMultiMediaRequest{
 			Peer:       peer.InputPeer(),
 			MultiMedia: media,
-		})
+		}
+		if !scheduleAt.IsZero() {
+			req.ScheduleDate = int(scheduleAt.Unix())
+		}
+		updResp, err := api.MessagesSendMultiMedia(ctx, req)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Album sent (%d files)\n", len(filePaths))
-		return printJSON(map[string]any{"status": "sent", "count": len(filePaths)})
+		var msgIDs []int
+		switch upd := updResp.(type) {
+		case *tg.Updates:
+			for _, u := range upd.Updates {
+				switch x := u.(type) {
+				case *tg.UpdateMessageID:
+					msgIDs = append(msgIDs, x.ID)
+				case *tg.UpdateNewMessage:
+					if m, ok := x.Message.(*tg.Message); ok {
+						msgIDs = append(msgIDs, m.ID)
+					}
+				case *tg.UpdateNewChannelMessage:
+					if m, ok := x.Message.(*tg.Message); ok {
+						msgIDs = append(msgIDs, m.ID)
+					}
+				case *tg.UpdateNewScheduledMessage:
+					if m, ok := x.Message.(*tg.Message); ok {
+						msgIDs = append(msgIDs, m.ID)
+					}
+				}
+			}
+		}
+		firstID := 0
+		if len(msgIDs) > 0 {
+			firstID = msgIDs[0]
+		}
+		if !scheduleAt.IsZero() {
+			fmt.Fprintf(os.Stderr, "Album scheduled (%d files) for %s (id=%d)\n", len(filePaths), scheduleAt.Format("2006-01-02 15:04"), firstID)
+			return printJSON(map[string]any{"status": "scheduled", "count": len(filePaths), "at": scheduleAt.Format(time.RFC3339), "id": firstID, "ids": msgIDs})
+		}
+		fmt.Fprintf(os.Stderr, "Album sent (%d files) (id=%d)\n", len(filePaths), firstID)
+		return printJSON(map[string]any{"status": "sent", "count": len(filePaths), "id": firstID, "ids": msgIDs})
 	})
 }
 
@@ -3381,6 +3507,162 @@ func cmdRestrict(c config, chatName, userName string, until time.Time,
 		}
 		fmt.Fprintf(os.Stderr, "Restricted %s in %s\n", userName, chatName)
 		return printJSON(map[string]any{"status": "restricted", "user": userName, "chat": chatName})
+	})
+}
+
+// ── list-scheduled ───────────────────────────────────────────────────────────
+
+// cmdListScheduled lists messages in the scheduled queue for a chat/channel.
+func cmdListScheduled(c config, name string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		p, err := resolvePeer(ctx, pm, api, name)
+		if err != nil {
+			return err
+		}
+		resp, err := api.MessagesGetScheduledHistory(ctx, &tg.MessagesGetScheduledHistoryRequest{
+			Peer: p.InputPeer(),
+			Hash: 0,
+		})
+		if err != nil {
+			return err
+		}
+		var msgs []tg.MessageClass
+		switch d := resp.(type) {
+		case *tg.MessagesMessages:
+			msgs = d.Messages
+		case *tg.MessagesMessagesSlice:
+			msgs = d.Messages
+		case *tg.MessagesChannelMessages:
+			msgs = d.Messages
+		case *tg.MessagesMessagesNotModified:
+			return printJSON(map[string]any{"chat": name, "scheduled_count": 0, "scheduled": []any{}})
+		}
+
+		type row struct {
+			ID      int    `json:"id"`
+			Date    int    `json:"date"`
+			Caption string `json:"caption,omitempty"`
+			HasMedia bool  `json:"has_media,omitempty"`
+		}
+		out := make([]row, 0, len(msgs))
+		for _, m := range msgs {
+			if mm, ok := m.(*tg.Message); ok {
+				out = append(out, row{
+					ID:       mm.ID,
+					Date:     mm.Date,
+					Caption:  mm.Message,
+					HasMedia: mm.Media != nil,
+				})
+			}
+		}
+		return printJSON(map[string]any{
+			"chat":            name,
+			"scheduled_count": len(out),
+			"scheduled":       out,
+		})
+	})
+}
+
+// ── set-discussion ───────────────────────────────────────────────────────────
+
+// cmdSetDiscussion links a broadcast channel with a megagroup as its discussion.
+// Pass empty groupName to unlink the existing discussion group.
+func cmdSetDiscussion(c config, channelName, groupName string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		chPeer, err := resolvePeer(ctx, pm, api, channelName)
+		if err != nil {
+			return err
+		}
+		ch, ok := chPeer.(peers.Channel)
+		if !ok {
+			return fmt.Errorf("%s is not a channel", channelName)
+		}
+
+		var groupInput tg.InputChannelClass = &tg.InputChannelEmpty{}
+		if groupName != "" {
+			gPeer, err := resolvePeer(ctx, pm, api, groupName)
+			if err != nil {
+				return fmt.Errorf("resolve group %s: %w", groupName, err)
+			}
+			g, ok := gPeer.(peers.Channel)
+			if !ok {
+				return fmt.Errorf("%s is not a supergroup", groupName)
+			}
+			groupInput = g.InputChannel()
+		}
+
+		_, err = api.ChannelsSetDiscussionGroup(ctx, &tg.ChannelsSetDiscussionGroupRequest{
+			Broadcast: ch.InputChannel(),
+			Group:     groupInput,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Discussion %s linked to %s\n", groupName, channelName)
+		return printJSON(map[string]any{
+			"status":  "linked",
+			"channel": channelName,
+			"group":   groupName,
+		})
+	})
+}
+
+// ── comment ──────────────────────────────────────────────────────────────────
+
+// cmdComment posts a comment under a channel post. Resolves the linked
+// discussion group thread root via MessagesGetDiscussionMessage, then sends
+// a reply to that root in the linked group.
+func cmdComment(c config, channelName string, msgID int, text string) error {
+	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+		chPeer, err := resolvePeer(ctx, pm, api, channelName)
+		if err != nil {
+			return err
+		}
+		disc, err := api.MessagesGetDiscussionMessage(ctx, &tg.MessagesGetDiscussionMessageRequest{
+			Peer:  chPeer.InputPeer(),
+			MsgID: msgID,
+		})
+		if err != nil {
+			return fmt.Errorf("get discussion msg: %w", err)
+		}
+		if len(disc.Messages) == 0 {
+			return fmt.Errorf("no discussion thread for msg %d (is the channel linked to a group?)", msgID)
+		}
+
+		root := disc.Messages[0]
+		rootMsg, ok := root.(*tg.Message)
+		if !ok {
+			return fmt.Errorf("unexpected root msg type: %T", root)
+		}
+
+		var groupPeer tg.InputPeerClass
+		switch p := rootMsg.PeerID.(type) {
+		case *tg.PeerChannel:
+			for _, ch := range disc.Chats {
+				if channel, ok := ch.(*tg.Channel); ok && channel.ID == p.ChannelID {
+					groupPeer = &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+					break
+				}
+			}
+		}
+		if groupPeer == nil {
+			return fmt.Errorf("could not resolve linked group peer")
+		}
+
+		_, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     groupPeer,
+			Message:  text,
+			RandomID: cryptoRandInt63(),
+			ReplyTo: &tg.InputReplyToMessage{
+				ReplyToMsgID: rootMsg.ID,
+				TopMsgID:     rootMsg.ID,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Comment sent to %s msg #%d (thread root #%d)\n", channelName, msgID, rootMsg.ID)
+		return nil
 	})
 }
 

@@ -9,6 +9,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -101,6 +102,8 @@ Telegram:
   transcribe <name> <id>                             Voice-to-text transcription
   restrict <chat> <user> [--no-send] [--no-media] [--no-web-preview] [--no-polls] [--until "..."]  Partial ban
   create-channel <title> [--supergroup] [--username @slug]  Create broadcast channel or supergroup
+  set-discussion <channel> <group>                    Link supergroup as channel discussion (empty to unlink)
+  comment <channel> <message-id> <text...>            Post a comment under a channel post (via linked group)
   search-members <group> <query> [--limit <n>]       Search members by name/username
   parse-members <group> [--limit <n>] [--out file.csv] [--format json]  Export all members to CSV
   active-members <group> [--days <n>] [--out file.json]  Members who wrote recently
@@ -652,6 +655,20 @@ func main() {
 			fatalf("%v", err)
 		}
 
+	case "paid-invite-link":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli paid-invite-link <name> --stars <amount> [--title \"label\"]")
+		}
+		stars, _ := flagInt(args, "--stars", 0)
+		if stars <= 0 {
+			fatalf("--stars must be > 0")
+		}
+		title, _ := flagStr(args, "--title")
+		if err := cmdPaidInviteLink(c, pos[0], int64(stars), title); err != nil {
+			fatalf("%v", err)
+		}
+
 	case "invite":
 		pos := positional(args)
 		if len(pos) < 2 {
@@ -802,9 +819,100 @@ func main() {
 	case "send-album":
 		pos := positional(args)
 		if len(pos) < 2 {
-			fatalf("usage: tg-cli send-album <name> <file1> [<file2>...]")
+			fatalf("usage: tg-cli send-album <name> <file1> [<file2>...] [--caption \"…\"] [--spoiler] [--at \"YYYY-MM-DD HH:MM\"]")
 		}
-		if err := cmdSendAlbum(c, pos[0], pos[1:]); err != nil {
+		caption, _ := flagStr(args, "--caption")
+		spoiler, _ := flagBool(args, "--spoiler")
+		atStr, _ := flagStr(args, "--at")
+		var scheduleAt time.Time
+		if atStr != "" {
+			t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
+			if err != nil {
+				fatalf("--at: expected format \"YYYY-MM-DD HH:MM\", got %q", atStr)
+			}
+			scheduleAt = t
+		}
+		if err := cmdSendAlbum(c, pos[0], pos[1:], caption, spoiler, scheduleAt); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "download-network":
+		urlOrSlug, _ := flagStr(args, "--chatlist")
+		if urlOrSlug == "" {
+			pos := positional(args)
+			if len(pos) > 0 {
+				urlOrSlug = pos[0]
+			}
+		}
+		if urlOrSlug == "" {
+			fatalf("usage: tg-cli download-network <addlist-url-or-slug> [--out <dir>] [--limit N] [--skip-media] [--skip-existing] [--peers @ch1,...] [--public-only] [--resume] [--auto-join] [--pause N]")
+		}
+		outDir, _ := flagStr(args, "--out")
+		if outDir == "" {
+			outDir = filepath.Join(".", "dump", "network_"+extractChatlistSlug(urlOrSlug))
+		}
+		limit, _ := flagInt(args, "--limit", 0)
+		skipMedia, _ := flagBool(args, "--skip-media")
+		skipExisting, _ := flagBool(args, "--skip-existing")
+		publicOnly, _ := flagBool(args, "--public-only")
+		resume, _ := flagBool(args, "--resume")
+		autoJoin, _ := flagBool(args, "--auto-join")
+		pause, _ := flagInt(args, "--pause", 2)
+		peersStr, _ := flagStr(args, "--peers")
+		var peerList []string
+		if peersStr != "" {
+			for _, p := range strings.Split(peersStr, ",") {
+				if s := strings.TrimSpace(p); s != "" {
+					peerList = append(peerList, s)
+				}
+			}
+		}
+		if err := cmdDownloadNetwork(c, urlOrSlug, outDir, limit, skipMedia, skipExisting, peerList, publicOnly, resume, autoJoin, pause); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "download-channel":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli download-channel <chat> [--out <dir>] [--limit N] [--skip-media] [--resume] [--batch N]")
+		}
+		outDir, _ := flagStr(args, "--out")
+		if outDir == "" {
+			outDir = filepath.Join(".", "dump", pos[0])
+		}
+		limit, _ := flagInt(args, "--limit", 0)
+		skipMedia, _ := flagBool(args, "--skip-media")
+		resume, _ := flagBool(args, "--resume")
+		batch, _ := flagInt(args, "--batch", 100)
+		if err := cmdDownloadChannel(c, pos[0], outDir, limit, skipMedia, resume, batch); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "chatlist-preview":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli chatlist-preview <addlist-url-or-slug>")
+		}
+		if err := cmdChatlistPreview(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "chatlist-join":
+		pos := positional(args)
+		if len(pos) == 0 {
+			fatalf("usage: tg-cli chatlist-join <addlist-url-or-slug> [--peers @ch1,@ch2,...] [--dry-run]")
+		}
+		peersStr, _ := flagStr(args, "--peers")
+		var peerList []string
+		if peersStr != "" {
+			for _, p := range strings.Split(peersStr, ",") {
+				if s := strings.TrimSpace(p); s != "" {
+					peerList = append(peerList, s)
+				}
+			}
+		}
+		dryRun, _ := flagBool(args, "--dry-run")
+		if err := cmdChatlistJoin(c, pos[0], peerList, dryRun); err != nil {
 			fatalf("%v", err)
 		}
 
@@ -873,6 +981,41 @@ func main() {
 		isSupergroup, _ := flagBool(args, "--supergroup")
 		username, _ := flagStr(args, "--username")
 		if err := cmdCreateChannel(c, strings.Join(pos, " "), isSupergroup, username); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "list-scheduled", "scheduled":
+		pos := positional(args)
+		if len(pos) < 1 {
+			fatalf("usage: tg-cli list-scheduled <name>")
+		}
+		if err := cmdListScheduled(c, pos[0]); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "set-discussion":
+		pos := positional(args)
+		if len(pos) < 1 {
+			fatalf("usage: tg-cli set-discussion <channel> <group>  (pass empty group to unlink)")
+		}
+		group := ""
+		if len(pos) >= 2 {
+			group = pos[1]
+		}
+		if err := cmdSetDiscussion(c, pos[0], group); err != nil {
+			fatalf("%v", err)
+		}
+
+	case "comment":
+		pos := positional(args)
+		if len(pos) < 3 {
+			fatalf("usage: tg-cli comment <channel> <message-id> <text...>")
+		}
+		msgID, err := strconv.Atoi(pos[1])
+		if err != nil {
+			fatalf("invalid message ID %q: must be a number", pos[1])
+		}
+		if err := cmdComment(c, pos[0], msgID, strings.Join(pos[2:], " ")); err != nil {
 			fatalf("%v", err)
 		}
 

@@ -1,3 +1,7 @@
 tg-cli
 test/
 test-1/
+
+# Local-only directories
+.claude/
+scripts/
