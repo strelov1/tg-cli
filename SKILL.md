@@ -24,11 +24,11 @@ description: >
   This is for the user's personal account (MTProto, not a bot).
   Two-step agent-friendly auth: call auth-request, get the code from the user, then call
   auth-complete — no interactive TTY needed. QR auth also available via auth-qr.
-version: 1.5.0
+version: 1.7.0
 metadata:
   openclaw:
     emoji: '✈️'
-    homepage: https://github.com/privateclaw-com/tg-cli
+    homepage: https://github.com/strelov1/tg-cli
     requires:
       bins:
         - tg-cli
@@ -44,7 +44,7 @@ metadata:
             x86_64) ARCH=amd64 ;;
             arm64|aarch64) ARCH=arm64 ;;
           esac
-          BASE="https://github.com/privateclaw-com/tg-cli/releases/latest/download"
+          BASE="https://github.com/strelov1/tg-cli/releases/latest/download"
           BIN="tg-cli-${OS}-${ARCH}"
           TMP=$(mktemp)
           curl -fsSL "${BASE}/${BIN}" -o "$TMP"
@@ -72,8 +72,8 @@ Standalone CLI for managing a personal Telegram account via MTProto. No subproce
 
 - **Verification codes and 2FA passwords** are required only during initial authorization (`auth-request` / `auth-complete`). These are standard Telegram credentials — never share them outside of this auth flow.
 - **The install script verifies SHA-256 checksums** against the official release manifest before installing the binary.
-- **Source code and release artifacts** are open and auditable at [github.com/privateclaw-com/tg-cli](https://github.com/privateclaw-com/tg-cli).
-- You can build from source instead of using the pre-built binary: `go install github.com/privateclaw-com/tg-cli@latest`
+- **Source code and release artifacts** are open and auditable at [github.com/strelov1/tg-cli](https://github.com/strelov1/tg-cli).
+- You can build from source instead of using the pre-built binary: `go install github.com/strelov1/tg-cli@latest`
 
 ---
 
@@ -614,7 +614,15 @@ tg-cli config set default-account +12025551234
 | Archive dialog       | `tg-cli archive <name>`                                        |
 | Unarchive dialog     | `tg-cli unarchive <name>`                                      |
 | Message link         | `tg-cli message-link <name> <id>`                              |
-| Send album           | `tg-cli send-album <name> <file1> [<file2>...]`                |
+| Send album           | `tg-cli send-album <name> <file1> [<file2>...] [--caption "..."] [--spoiler] [--at "YYYY-MM-DD HH:MM"]` |
+| List scheduled       | `tg-cli list-scheduled <name>`                                 |
+| Paid invite (Stars)  | `tg-cli paid-invite-link <name> --stars <amount> [--title "..."]` |
+| Comment on post      | `tg-cli comment <channel> <message-id> <text...>`              |
+| Link discussion      | `tg-cli set-discussion <channel> <group>`                      |
+| Preview chat folder  | `tg-cli chatlist-preview <addlist-url-or-slug>`                |
+| Join chat folder     | `tg-cli chatlist-join <addlist-url-or-slug> [--peers @ch1,...] [--dry-run]` |
+| Dump a channel       | `tg-cli download-channel <chat> [--out <dir>] [--limit N] [--skip-media] [--resume]` |
+| Dump folder network  | `tg-cli download-network <addlist-url-or-slug> [--out <dir>] [--peers @ch1,...] [--auto-join] [--resume]` |
 | Send with HTML/MD    | `tg-cli send <name> <text> --parse-mode html\|markdown`        |
 | Watch with filter    | `tg-cli watch <name> [--keyword <w>] [--event new,edit]`       |
 | Read media only      | `tg-cli read <name> --media-only`                              |

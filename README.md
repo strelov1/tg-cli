@@ -1,4 +1,4 @@
-# tg-cli — v1.5.0
+# tg-cli — v1.7.0
 
 **Agentic-native Telegram CLI** — control Telegram from the command line with no interactive input required. Designed for AI agents: every command is a single call, output is JSON on stdout.
 
@@ -19,13 +19,13 @@ Standard Telegram CLIs require an interactive TTY (entering codes, passwords). `
 ## Installation
 
 ```bash
-go install github.com/privateclaw-com/tg-cli@latest
+go install github.com/strelov1/tg-cli@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/privateclaw-com/tg-cli
+git clone https://github.com/strelov1/tg-cli
 cd tg-cli
 go build -o tg-cli .
 ```
@@ -348,6 +348,41 @@ tg-cli message-link team-chat 12345
 # Send with rich text formatting
 tg-cli send team-chat "<b>Bold</b> and <i>italic</i>" --parse-mode html
 tg-cli send team-chat "**bold** and _italic_" --parse-mode markdown
+```
+
+### Channels — comments, scheduled, paid invites (v1.7)
+
+```bash
+# Link a discussion group to a channel
+tg-cli set-discussion my-channel my-discussion-group
+
+# Post a comment under a channel post (resolves to linked group thread)
+tg-cli comment my-channel 12345 "Great post!"
+
+# List messages in the scheduled queue
+tg-cli list-scheduled team-chat
+
+# Create a Telegram Stars subscription invite link (paid, 30-day cycle)
+tg-cli paid-invite-link my-channel --stars 50 --title "VIP access"
+
+# Send an album with caption, spoiler-blur and schedule
+tg-cli send-album team-chat photo1.jpg photo2.jpg --caption "Trip" --spoiler --at "2026-06-01 10:00"
+```
+
+### Chat folders & bulk dump (v1.7)
+
+```bash
+# Preview a chat-folder share link without joining
+tg-cli chatlist-preview https://t.me/addlist/abc123
+
+# Join all chats from a folder link (or a subset via --peers)
+tg-cli chatlist-join https://t.me/addlist/abc123 --peers @ch1,@ch2
+
+# Dump a single channel to JSON + download media
+tg-cli download-channel @news --out ./dump --limit 1000 --resume
+
+# Bulk-dump every channel from a folder link
+tg-cli download-network https://t.me/addlist/abc123 --out ./dump --auto-join --resume
 ```
 
 ## Global flags

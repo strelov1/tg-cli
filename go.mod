@@ -1,4 +1,4 @@
-module github.com/privateclaw/tg-cli
+module github.com/strelov1/tg-cli
 
 go 1.24.0
 

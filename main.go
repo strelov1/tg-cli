@@ -45,7 +45,7 @@ Telegram:
   export <name> [--limit <n>]                         Export full history (stdout JSON)
   send <name> <text...> [--at "YYYY-MM-DD HH:MM"] [--parse-mode html|markdown]  Send message
   send-file <name> <path>                             Send a file or document
-  send-album <name> <file1> [<file2>...]              Send a group of files as an album
+  send-album <name> <file1> [<file2>...] [--caption "..."] [--spoiler] [--at "YYYY-MM-DD HH:MM"]  Album
   reply <name> <message-id> <text...>                 Reply to a specific message
   edit <name> <message-id> <text...>                  Edit own message
   delete <name> <message-id> [<id>...]                Delete message(s)
@@ -115,6 +115,12 @@ Telegram:
   poll <target> <question> <opt1> <opt2> [...] [--anonymous] [--multiple]  Create a poll
   schedule <name> <text...> --at "YYYY-MM-DD HH:MM"  Schedule a message (alias for send --at)
   resolve <username|id>                              Resolve username ↔ numeric ID
+  list-scheduled <name>                              List messages in the scheduled queue
+  paid-invite-link <name> --stars <amount> [--title "label"]  Stars-subscription invite link (30d)
+  chatlist-preview <addlist-url-or-slug>             Inspect a chat-folder share link
+  chatlist-join <addlist-url-or-slug> [--peers @ch1,@ch2,...] [--dry-run]  Join chats from folder link
+  download-channel <chat> [--out <dir>] [--limit N] [--skip-media] [--resume] [--batch N]  Dump channel to JSON + media
+  download-network <addlist-url-or-slug> [--out <dir>] [--limit N] [--skip-media] [--skip-existing] [--peers @ch1,...] [--public-only] [--resume] [--auto-join] [--pause N]  Bulk-dump a folder of channels
 
 Config keys:
   app-id           Telegram App ID  (https://my.telegram.org/apps)
