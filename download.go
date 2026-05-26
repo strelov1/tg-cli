@@ -15,6 +15,15 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+const (
+	// dumpPartSize is the chunk size used by the gotd downloader.
+	dumpPartSize = 512 * 1024
+	// dumpBatchSize is the max messages per MessagesGetHistory call.
+	dumpBatchSize = 100
+	// dumpPollInterval throttles the loop between batches to avoid FLOOD_WAIT.
+	dumpPollInterval = 300 * time.Millisecond
+)
+
 // dumpedMsg is the on-disk representation of a single message.
 type dumpedMsg struct {
 	ID         int                      `json:"id"`
@@ -317,11 +326,8 @@ func cmdDownloadChannel(c config, name, outDir string, limit int, skipMedia bool
 	if outDir == "" {
 		return fmt.Errorf("--out is required")
 	}
-	if batchSize <= 0 || batchSize > 100 {
-		batchSize = 100
-	}
 
-	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+	return withTelegram(c, func(ctx context.Context, _ *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, api, name)
 		if err != nil {
 			return err
@@ -330,209 +336,74 @@ func cmdDownloadChannel(c config, name, outDir string, limit int, skipMedia bool
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", outDir, err)
 		}
-		mediaDir := filepath.Join(outDir, "media")
-		if !skipMedia {
-			if err := os.MkdirAll(mediaDir, 0o755); err != nil {
-				return fmt.Errorf("mkdir media: %w", err)
-			}
-		}
 
-		// meta.json
-		meta := map[string]any{}
-		switch peer := p.(type) {
-		case peers.Channel:
-			ch := peer.Raw()
-			meta["type"] = "channel"
-			if ch.Megagroup {
-				meta["type"] = "supergroup"
-			}
-			meta["id"] = ch.ID
-			meta["title"] = ch.Title
-			meta["username"] = ch.Username
-			meta["members"] = ch.ParticipantsCount
-			full, ferr := api.ChannelsGetFullChannel(ctx, peer.InputChannel())
-			if ferr == nil {
-				if fc, ok := full.FullChat.(*tg.ChannelFull); ok {
-					meta["description"] = fc.About
-					meta["members"] = fc.ParticipantsCount
-					meta["pinned_msg_id"] = fc.PinnedMsgID
-					meta["read_inbox_max_id"] = fc.ReadInboxMaxID
-				}
-			}
-		case peers.User:
-			u := peer.Raw()
-			meta["type"] = "user"
-			meta["id"] = u.ID
-			meta["username"] = u.Username
-			meta["first_name"] = u.FirstName
-			meta["last_name"] = u.LastName
-		case peers.Chat:
-			ch := peer.Raw()
-			meta["type"] = "group"
-			meta["id"] = ch.ID
-			meta["title"] = ch.Title
-		}
-		meta["dumped_at"] = time.Now().UTC().Format(time.RFC3339)
-		meta["dumped_by"] = c.account
+		meta := buildPeerMeta(ctx, api, p, c.account)
 		if err := writeJSON(filepath.Join(outDir, "meta.json"), meta); err != nil {
 			return err
 		}
 
-		// resume: load existing messages.json and skip already-saved ids
-		messagesPath := filepath.Join(outDir, "messages.json")
-		seen := make(map[int]bool)
-		var existing []dumpedMsg
-		if resume {
-			if data, err := os.ReadFile(messagesPath); err == nil {
-				_ = json.Unmarshal(data, &existing)
-				for _, m := range existing {
-					seen[m.ID] = true
-				}
-				fmt.Fprintf(os.Stderr, "Resume: %d messages already dumped\n", len(existing))
-			}
-		}
-
-		d := downloader.NewDownloader().WithPartSize(512 * 1024)
-		dumped := existing
-		offsetID := 0
-		fetched := 0
-		downloadedMedia := 0
-
-		for {
-			req := &tg.MessagesGetHistoryRequest{
-				Peer:     p.InputPeer(),
-				OffsetID: offsetID,
-				Limit:    batchSize,
-			}
-			result, err := api.MessagesGetHistory(ctx, req)
-			if err != nil {
-				return fmt.Errorf("get history (offset %d): %w", offsetID, err)
-			}
-			msgs, _, _, err := extractHistoryMessages(result)
-			if err != nil {
-				return err
-			}
-			if len(msgs) == 0 {
-				break
-			}
-
-			// process oldest first within batch — actually GetHistory returns newest first.
-			for _, mc := range msgs {
-				msg, ok := mc.(*tg.Message)
-				if !ok || msg.ID == 0 {
-					continue
-				}
-				if seen[msg.ID] {
-					continue
-				}
-				seen[msg.ID] = true
-
-				dm := dumpedMsg{
-					ID:         msg.ID,
-					UnixDate:   msg.Date,
-					Date:       time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
-					Text:       msg.Message,
-					Entities:   serializeEntities(msg.Entities),
-					ReplyTo:    msgReplyTo(msg),
-					Reactions:  msgReactions(msg),
-					Pinned:     msg.Pinned,
-				}
-				if v, ok := msg.GetViews(); ok {
-					dm.Views = v
-				}
-				if f, ok := msg.GetForwards(); ok {
-					dm.Forwards = f
-				}
-				if pa, ok := msg.GetPostAuthor(); ok {
-					dm.PostAuthor = pa
-				}
-				if g, ok := msg.GetGroupedID(); ok {
-					dm.GroupedID = g
-				}
-				if fwd, ok := msg.GetFwdFrom(); ok {
-					fm := map[string]any{
-						"date": time.Unix(int64(fwd.Date), 0).UTC().Format(time.RFC3339),
-					}
-					if fwd.FromName != "" {
-						fm["from_name"] = fwd.FromName
-					}
-					if fwd.PostAuthor != "" {
-						fm["post_author"] = fwd.PostAuthor
-					}
-					if fwd.ChannelPost != 0 {
-						fm["channel_post"] = fwd.ChannelPost
-					}
-					dm.Forward = fm
-				}
-
-				if msg.Media != nil {
-					mediaInfo, mErr := describeAndDownloadMedia(ctx, api, d, msg.ID, msg.Media, mediaDir, skipMedia)
-					if mErr != nil {
-						fmt.Fprintf(os.Stderr, "media error msg %d: %v\n", msg.ID, mErr)
-						if mediaInfo == nil {
-							mediaInfo = map[string]any{}
-						}
-						mediaInfo["error"] = mErr.Error()
-					}
-					if mediaInfo != nil {
-						dm.Media = mediaInfo
-						if _, ok := mediaInfo["file"]; ok {
-							downloadedMedia++
-						}
-					}
-				}
-
-				dumped = append(dumped, dm)
-				fetched++
-
-				if limit > 0 && fetched >= limit {
-					break
-				}
-			}
-
-			// next page: oldest message id in batch becomes new offset
-			minID := 0
-			for _, mc := range msgs {
-				if msg, ok := mc.(*tg.Message); ok && msg.ID != 0 {
-					if minID == 0 || msg.ID < minID {
-						minID = msg.ID
-					}
-				}
-			}
-			if minID == 0 || minID == offsetID {
-				break
-			}
-			offsetID = minID
-
-			fmt.Fprintf(os.Stderr, "fetched=%d media=%d offset=%d\n", fetched, downloadedMedia, offsetID)
-
-			// flush messages.json periodically
-			if err := writeJSONAtomic(messagesPath, dumped); err != nil {
-				return err
-			}
-
-			if limit > 0 && fetched >= limit {
-				break
-			}
-
-			// be polite
-			time.Sleep(300 * time.Millisecond)
-		}
-
-		// final flush
-		if err := writeJSONAtomic(messagesPath, dumped); err != nil {
+		d := downloader.NewDownloader().WithPartSize(dumpPartSize)
+		stats, err := dumpHistory(ctx, api, d, p.InputPeer(), dumpOpts{
+			OutDir:    outDir,
+			Limit:     limit,
+			BatchSize: batchSize,
+			SkipMedia: skipMedia,
+			Resume:    resume,
+		})
+		if err != nil {
 			return err
 		}
 
 		return printJSON(map[string]any{
 			"status":           "done",
 			"channel":          name,
-			"dumped_messages":  len(dumped),
-			"new_this_run":     fetched,
-			"downloaded_media": downloadedMedia,
+			"dumped_messages":  stats.Total,
+			"new_this_run":     stats.New,
+			"downloaded_media": stats.Media,
 			"out_dir":          outDir,
 		})
 	})
+}
+
+// buildPeerMeta produces the meta.json payload for cmdDownloadChannel.
+func buildPeerMeta(ctx context.Context, api *tg.Client, p peers.Peer, account string) map[string]any {
+	meta := map[string]any{
+		"dumped_at": time.Now().UTC().Format(time.RFC3339),
+		"dumped_by": account,
+	}
+	switch peer := p.(type) {
+	case peers.Channel:
+		ch := peer.Raw()
+		meta["type"] = "channel"
+		if ch.Megagroup {
+			meta["type"] = "supergroup"
+		}
+		meta["id"] = ch.ID
+		meta["title"] = ch.Title
+		meta["username"] = ch.Username
+		meta["members"] = ch.ParticipantsCount
+		if full, ferr := api.ChannelsGetFullChannel(ctx, peer.InputChannel()); ferr == nil {
+			if fc, ok := full.FullChat.(*tg.ChannelFull); ok {
+				meta["description"] = fc.About
+				meta["members"] = fc.ParticipantsCount
+				meta["pinned_msg_id"] = fc.PinnedMsgID
+				meta["read_inbox_max_id"] = fc.ReadInboxMaxID
+			}
+		}
+	case peers.User:
+		u := peer.Raw()
+		meta["type"] = "user"
+		meta["id"] = u.ID
+		meta["username"] = u.Username
+		meta["first_name"] = u.FirstName
+		meta["last_name"] = u.LastName
+	case peers.Chat:
+		ch := peer.Raw()
+		meta["type"] = "group"
+		meta["id"] = ch.ID
+		meta["title"] = ch.Title
+	}
+	return meta
 }
 
 func writeJSON(path string, v any) error {
@@ -549,4 +420,175 @@ func writeJSONAtomic(path string, v any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// dumpOpts bundles the knobs shared by cmdDownloadChannel and dumpOneChannel.
+type dumpOpts struct {
+	OutDir    string
+	Limit     int
+	BatchSize int
+	SkipMedia bool
+	Resume    bool
+	// LogPrefix is prepended to per-batch stderr progress lines.
+	LogPrefix string
+}
+
+// dumpStats reports the outcome of dumpHistory.
+type dumpStats struct {
+	Total int // messages persisted (existing + new)
+	New   int // messages fetched this run
+	Media int // media files downloaded
+}
+
+// dumpHistory paginates MessagesGetHistory for peer and writes messages.json
+// (plus optional media/) under opts.OutDir. Shared between download-channel and
+// download-network so the resume/dedup/throttle logic stays in one place.
+func dumpHistory(ctx context.Context, api *tg.Client, d *downloader.Downloader, peer tg.InputPeerClass, opts dumpOpts) (dumpStats, error) {
+	var stats dumpStats
+	batchSize := opts.BatchSize
+	if batchSize <= 0 || batchSize > dumpBatchSize {
+		batchSize = dumpBatchSize
+	}
+
+	mediaDir := filepath.Join(opts.OutDir, "media")
+	if !opts.SkipMedia {
+		if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+			return stats, fmt.Errorf("mkdir media: %w", err)
+		}
+	}
+
+	messagesPath := filepath.Join(opts.OutDir, "messages.json")
+	seen := make(map[int]bool)
+	var dumped []dumpedMsg
+	if opts.Resume {
+		if data, err := os.ReadFile(messagesPath); err == nil {
+			_ = json.Unmarshal(data, &dumped)
+			for _, m := range dumped {
+				seen[m.ID] = true
+			}
+			if len(dumped) > 0 {
+				fmt.Fprintf(os.Stderr, "%sResume: %d messages already dumped\n", opts.LogPrefix, len(dumped))
+			}
+		}
+	}
+
+	offsetID := 0
+	for {
+		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:     peer,
+			OffsetID: offsetID,
+			Limit:    batchSize,
+		})
+		if err != nil {
+			return stats, fmt.Errorf("get history (offset %d): %w", offsetID, err)
+		}
+		msgs, _, _, err := extractHistoryMessages(result)
+		if err != nil {
+			return stats, err
+		}
+		if len(msgs) == 0 {
+			break
+		}
+
+		minID := 0
+		for _, mc := range msgs {
+			msg, ok := mc.(*tg.Message)
+			if !ok || msg.ID == 0 {
+				continue
+			}
+			if minID == 0 || msg.ID < minID {
+				minID = msg.ID
+			}
+			if seen[msg.ID] {
+				continue
+			}
+			seen[msg.ID] = true
+
+			dm := buildDumpedMsg(msg)
+			if msg.Media != nil {
+				mediaInfo, mErr := describeAndDownloadMedia(ctx, api, d, msg.ID, msg.Media, mediaDir, opts.SkipMedia)
+				if mErr != nil {
+					if mediaInfo == nil {
+						mediaInfo = map[string]any{}
+					}
+					mediaInfo["error"] = mErr.Error()
+				}
+				if mediaInfo != nil {
+					dm.Media = mediaInfo
+					if _, ok := mediaInfo["file"]; ok {
+						stats.Media++
+					}
+				}
+			}
+
+			dumped = append(dumped, dm)
+			stats.New++
+
+			if opts.Limit > 0 && stats.New >= opts.Limit {
+				break
+			}
+		}
+
+		if minID == 0 || minID == offsetID {
+			break
+		}
+		offsetID = minID
+
+		fmt.Fprintf(os.Stderr, "%sfetched=%d media=%d offset=%d\n", opts.LogPrefix, stats.New, stats.Media, offsetID)
+		if err := writeJSONAtomic(messagesPath, dumped); err != nil {
+			return stats, err
+		}
+
+		if opts.Limit > 0 && stats.New >= opts.Limit {
+			break
+		}
+		time.Sleep(dumpPollInterval)
+	}
+
+	if err := writeJSONAtomic(messagesPath, dumped); err != nil {
+		return stats, err
+	}
+	stats.Total = len(dumped)
+	return stats, nil
+}
+
+// buildDumpedMsg extracts the on-disk representation from a Telegram message,
+// excluding media (which is handled by the caller because it may download files).
+func buildDumpedMsg(msg *tg.Message) dumpedMsg {
+	dm := dumpedMsg{
+		ID:        msg.ID,
+		UnixDate:  msg.Date,
+		Date:      time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
+		Text:      msg.Message,
+		Entities:  serializeEntities(msg.Entities),
+		ReplyTo:   msgReplyTo(msg),
+		Reactions: msgReactions(msg),
+		Pinned:    msg.Pinned,
+	}
+	if v, ok := msg.GetViews(); ok {
+		dm.Views = v
+	}
+	if f, ok := msg.GetForwards(); ok {
+		dm.Forwards = f
+	}
+	if pa, ok := msg.GetPostAuthor(); ok {
+		dm.PostAuthor = pa
+	}
+	if g, ok := msg.GetGroupedID(); ok {
+		dm.GroupedID = g
+	}
+	if fwd, ok := msg.GetFwdFrom(); ok {
+		fm := map[string]any{"date": time.Unix(int64(fwd.Date), 0).UTC().Format(time.RFC3339)}
+		if fwd.FromName != "" {
+			fm["from_name"] = fwd.FromName
+		}
+		if fwd.PostAuthor != "" {
+			fm["post_author"] = fwd.PostAuthor
+		}
+		if fwd.ChannelPost != 0 {
+			fm["channel_post"] = fwd.ChannelPost
+		}
+		dm.Forward = fm
+	}
+	return dm
 }

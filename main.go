@@ -290,9 +290,9 @@ func main() {
 		parseMode, _ := flagStr(args2, "--parse-mode")
 		var scheduleAt time.Time
 		if atStr != "" {
-			t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
+			t, err := parseLocalTime("--at", atStr)
 			if err != nil {
-				fatalf("--at: expected format \"YYYY-MM-DD HH:MM\", got %q", atStr)
+				fatalf("%v", err)
 			}
 			scheduleAt = t
 		}
@@ -718,9 +718,9 @@ func main() {
 		untilStr, _ := flagStr(args, "--until")
 		var until time.Time
 		if untilStr != "" {
-			t, err := time.ParseInLocation("2006-01-02 15:04", untilStr, time.Local)
+			t, err := parseLocalTime("--until", untilStr)
 			if err != nil {
-				fatalf("--until: expected format \"YYYY-MM-DD HH:MM\", got %q", untilStr)
+				fatalf("%v", err)
 			}
 			until = t
 		}
@@ -832,9 +832,9 @@ func main() {
 		atStr, _ := flagStr(args, "--at")
 		var scheduleAt time.Time
 		if atStr != "" {
-			t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
+			t, err := parseLocalTime("--at", atStr)
 			if err != nil {
-				fatalf("--at: expected format \"YYYY-MM-DD HH:MM\", got %q", atStr)
+				fatalf("%v", err)
 			}
 			scheduleAt = t
 		}
@@ -865,14 +865,7 @@ func main() {
 		autoJoin, _ := flagBool(args, "--auto-join")
 		pause, _ := flagInt(args, "--pause", 2)
 		peersStr, _ := flagStr(args, "--peers")
-		var peerList []string
-		if peersStr != "" {
-			for _, p := range strings.Split(peersStr, ",") {
-				if s := strings.TrimSpace(p); s != "" {
-					peerList = append(peerList, s)
-				}
-			}
-		}
+		peerList := splitCSV(peersStr)
 		if err := cmdDownloadNetwork(c, urlOrSlug, outDir, limit, skipMedia, skipExisting, peerList, publicOnly, resume, autoJoin, pause); err != nil {
 			fatalf("%v", err)
 		}
@@ -909,14 +902,7 @@ func main() {
 			fatalf("usage: tg-cli chatlist-join <addlist-url-or-slug> [--peers @ch1,@ch2,...] [--dry-run]")
 		}
 		peersStr, _ := flagStr(args, "--peers")
-		var peerList []string
-		if peersStr != "" {
-			for _, p := range strings.Split(peersStr, ",") {
-				if s := strings.TrimSpace(p); s != "" {
-					peerList = append(peerList, s)
-				}
-			}
-		}
+		peerList := splitCSV(peersStr)
 		dryRun, _ := flagBool(args, "--dry-run")
 		if err := cmdChatlistJoin(c, pos[0], peerList, dryRun); err != nil {
 			fatalf("%v", err)
@@ -961,9 +947,9 @@ func main() {
 		untilStr, _ := flagStr(args, "--until")
 		var until time.Time
 		if untilStr != "" {
-			t, err := time.ParseInLocation("2006-01-02 15:04", untilStr, time.Local)
+			t, err := parseLocalTime("--until", untilStr)
 			if err != nil {
-				fatalf("--until: expected format \"YYYY-MM-DD HH:MM\", got %q", untilStr)
+				fatalf("%v", err)
 			}
 			until = t
 		}
@@ -1281,9 +1267,9 @@ func main() {
 		if atStr == "" {
 			fatalf("--at is required for schedule")
 		}
-		t, err := time.ParseInLocation("2006-01-02 15:04", atStr, time.Local)
+		t, err := parseLocalTime("--at", atStr)
 		if err != nil {
-			fatalf("--at: expected format \"YYYY-MM-DD HH:MM\", got %q", atStr)
+			fatalf("%v", err)
 		}
 		if err := cmdSend(c, pos[0], strings.Join(pos[1:], " "), t, parseMode); err != nil {
 			fatalf("%v", err)

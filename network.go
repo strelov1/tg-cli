@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,9 +14,6 @@ import (
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/tg"
 )
-
-var _ = telegram.RunUntilCanceled
-var _ peers.Manager
 
 func cmdDownloadNetwork(
 	c config,
@@ -48,7 +44,7 @@ func cmdDownloadNetwork(
 		filterSet[strings.ToLower(strings.TrimPrefix(p, "@"))] = true
 	}
 
-	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+	return withTelegram(c, func(ctx context.Context, _ *telegram.Client, api *tg.Client, _ *peers.Manager) error {
 		resp, err := api.ChatlistsCheckChatlistInvite(ctx, slug)
 		if err != nil {
 			return fmt.Errorf("check chatlist invite: %w", err)
@@ -103,9 +99,7 @@ func cmdDownloadNetwork(
 			}
 		}
 
-		_ = pm
-		_ = client
-		d := downloader.NewDownloader().WithPartSize(512 * 1024)
+		d := downloader.NewDownloader().WithPartSize(dumpPartSize)
 		report := []map[string]any{}
 		for i, ch := range picked {
 			label := ch.Username
@@ -157,7 +151,8 @@ func summarizeChannels(chs []*tg.Channel) []map[string]any {
 	return out
 }
 
-// dumpOneChannel mirrors cmdDownloadChannel logic but reuses the active session.
+// dumpOneChannel writes meta.json + messages.json (+ media) for one channel.
+// Used by cmdDownloadNetwork to walk every channel of a chatlist share.
 func dumpOneChannel(
 	ctx context.Context,
 	c config,
@@ -171,12 +166,6 @@ func dumpOneChannel(
 ) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
-	}
-	mediaDir := filepath.Join(outDir, "media")
-	if !skipMedia {
-		if err := os.MkdirAll(mediaDir, 0o755); err != nil {
-			return err
-		}
 	}
 
 	inputCh := &tg.InputChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}
@@ -206,133 +195,16 @@ func dumpOneChannel(
 		return err
 	}
 
-	messagesPath := filepath.Join(outDir, "messages.json")
-	seen := map[int]bool{}
-	var dumped []dumpedMsg
-	if resume {
-		if data, err := os.ReadFile(messagesPath); err == nil {
-			_ = json.Unmarshal(data, &dumped)
-			for _, m := range dumped {
-				seen[m.ID] = true
-			}
-		}
+	stats, err := dumpHistory(ctx, api, d, inputPeer, dumpOpts{
+		OutDir:    outDir,
+		Limit:     limit,
+		SkipMedia: skipMedia,
+		Resume:    resume,
+		LogPrefix: "  ",
+	})
+	if err != nil {
+		return err
 	}
-
-	offsetID := 0
-	fetched := 0
-	mediaCount := 0
-	const batchSize = 100
-
-	for {
-		req := &tg.MessagesGetHistoryRequest{
-			Peer:     inputPeer,
-			OffsetID: offsetID,
-			Limit:    batchSize,
-		}
-		result, err := api.MessagesGetHistory(ctx, req)
-		if err != nil {
-			return fmt.Errorf("get history offset=%d: %w", offsetID, err)
-		}
-		msgs, _, _, err := extractHistoryMessages(result)
-		if err != nil {
-			return err
-		}
-		if len(msgs) == 0 {
-			break
-		}
-
-		for _, mc := range msgs {
-			msg, ok := mc.(*tg.Message)
-			if !ok || msg.ID == 0 {
-				continue
-			}
-			if seen[msg.ID] {
-				continue
-			}
-			seen[msg.ID] = true
-
-			dm := dumpedMsg{
-				ID:        msg.ID,
-				UnixDate:  msg.Date,
-				Date:      time.Unix(int64(msg.Date), 0).UTC().Format(time.RFC3339),
-				Text:      msg.Message,
-				Entities:  serializeEntities(msg.Entities),
-				ReplyTo:   msgReplyTo(msg),
-				Reactions: msgReactions(msg),
-				Pinned:    msg.Pinned,
-			}
-			if v, ok := msg.GetViews(); ok {
-				dm.Views = v
-			}
-			if f, ok := msg.GetForwards(); ok {
-				dm.Forwards = f
-			}
-			if pa, ok := msg.GetPostAuthor(); ok {
-				dm.PostAuthor = pa
-			}
-			if g, ok := msg.GetGroupedID(); ok {
-				dm.GroupedID = g
-			}
-			if fwd, ok := msg.GetFwdFrom(); ok {
-				fm := map[string]any{"date": time.Unix(int64(fwd.Date), 0).UTC().Format(time.RFC3339)}
-				if fwd.FromName != "" {
-					fm["from_name"] = fwd.FromName
-				}
-				if fwd.PostAuthor != "" {
-					fm["post_author"] = fwd.PostAuthor
-				}
-				if fwd.ChannelPost != 0 {
-					fm["channel_post"] = fwd.ChannelPost
-				}
-				dm.Forward = fm
-			}
-			if msg.Media != nil {
-				mediaInfo, mErr := describeAndDownloadMedia(ctx, api, d, msg.ID, msg.Media, mediaDir, skipMedia)
-				if mErr != nil {
-					if mediaInfo == nil {
-						mediaInfo = map[string]any{}
-					}
-					mediaInfo["error"] = mErr.Error()
-				}
-				if mediaInfo != nil {
-					dm.Media = mediaInfo
-					if _, ok := mediaInfo["file"]; ok {
-						mediaCount++
-					}
-				}
-			}
-
-			dumped = append(dumped, dm)
-			fetched++
-
-			if limit > 0 && fetched >= limit {
-				break
-			}
-		}
-
-		minID := 0
-		for _, mc := range msgs {
-			if msg, ok := mc.(*tg.Message); ok && msg.ID != 0 {
-				if minID == 0 || msg.ID < minID {
-					minID = msg.ID
-				}
-			}
-		}
-		if minID == 0 || minID == offsetID {
-			break
-		}
-		offsetID = minID
-
-		fmt.Fprintf(os.Stderr, "  fetched=%d media=%d offset=%d\n", fetched, mediaCount, offsetID)
-		_ = writeJSONAtomic(messagesPath, dumped)
-
-		if limit > 0 && fetched >= limit {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-
-	_ = writeJSONAtomic(messagesPath, dumped)
-	fmt.Fprintf(os.Stderr, "  done: messages=%d media=%d\n", len(dumped), mediaCount)
+	fmt.Fprintf(os.Stderr, "  done: messages=%d media=%d\n", stats.Total, stats.Media)
 	return nil
 }

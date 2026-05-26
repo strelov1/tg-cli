@@ -1988,22 +1988,23 @@ func cmdInviteLink(c config, name string) error {
 	})
 }
 
+// starsSubscriptionPeriodSec is the only period Telegram currently allows for
+// Stars subscriptions (30 days).
+const starsSubscriptionPeriodSec = 30 * 24 * 60 * 60
+
 // cmdPaidInviteLink creates a Telegram Stars subscription invite link.
 // Joining users must pay `stars` Stars every 30 days to retain access.
 func cmdPaidInviteLink(c config, name string, stars int64, title string) error {
-	return withTelegram(c, func(ctx context.Context, client *telegram.Client, api *tg.Client, pm *peers.Manager) error {
+	return withTelegram(c, func(ctx context.Context, _ *telegram.Client, api *tg.Client, pm *peers.Manager) error {
 		p, err := resolvePeer(ctx, pm, api, name)
 		if err != nil {
 			return err
 		}
-		req := &tg.MessagesExportChatInviteRequest{
-			Peer: p.InputPeer(),
-			SubscriptionPricing: tg.StarsSubscriptionPricing{
-				Period: 30 * 24 * 60 * 60,
-				Amount: stars,
-			},
-		}
-		req.SetSubscriptionPricing(req.SubscriptionPricing)
+		req := &tg.MessagesExportChatInviteRequest{Peer: p.InputPeer()}
+		req.SetSubscriptionPricing(tg.StarsSubscriptionPricing{
+			Period: starsSubscriptionPeriodSec,
+			Amount: stars,
+		})
 		if title != "" {
 			req.SetTitle(title)
 		}
@@ -2016,13 +2017,13 @@ func cmdPaidInviteLink(c config, name string, stars int64, title string) error {
 			return fmt.Errorf("unexpected result type: %T", result)
 		}
 		return printJSON(map[string]any{
-			"link":             inv.Link,
-			"stars_per_month":  stars,
-			"period_seconds":   30 * 24 * 60 * 60,
-			"title":            title,
-			"permanent":        inv.Permanent,
-			"revoked":          inv.Revoked,
-			"request_needed":   inv.RequestNeeded,
+			"link":            inv.Link,
+			"stars_per_month": stars,
+			"period_seconds":  starsSubscriptionPeriodSec,
+			"title":           title,
+			"permanent":       inv.Permanent,
+			"revoked":         inv.Revoked,
+			"request_needed":  inv.RequestNeeded,
 		})
 	})
 }
@@ -3144,21 +3145,27 @@ func cmdSendAlbum(c config, name string, filePaths []string, caption string, spo
 		u := uploader.NewUploader(api)
 		var media []tg.InputSingleMedia
 
-		for i, path := range filePaths {
+		uploadOne := func(path string) (tg.InputFileClass, error) {
 			f, err := os.Open(path)
 			if err != nil {
-				return fmt.Errorf("open %s: %w", path, err)
+				return nil, fmt.Errorf("open %s: %w", path, err)
 			}
-			defer f.Close() //nolint:gocritic
-
+			defer f.Close()
 			fi, err := f.Stat()
 			if err != nil {
-				return fmt.Errorf("stat %s: %w", path, err)
+				return nil, fmt.Errorf("stat %s: %w", path, err)
 			}
-
-			uploaded, err := u.Upload(ctx, uploader.NewUpload(filepath.Base(path), f, fi.Size()))
+			up, err := u.Upload(ctx, uploader.NewUpload(filepath.Base(path), f, fi.Size()))
 			if err != nil {
-				return fmt.Errorf("upload %s: %w", path, err)
+				return nil, fmt.Errorf("upload %s: %w", path, err)
+			}
+			return up, nil
+		}
+
+		for i, path := range filePaths {
+			uploaded, err := uploadOne(path)
+			if err != nil {
+				return err
 			}
 
 			mimeType := mime.TypeByExtension(filepath.Ext(path))

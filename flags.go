@@ -85,6 +85,32 @@ func parseSince(s string) (time.Time, error) {
 	return time.Now().Add(-d), nil
 }
 
+// parseLocalTime parses a "YYYY-MM-DD HH:MM" timestamp in the local timezone.
+// flagName is used in the error message (e.g. "--at", "--until") so callers
+// don't all have to repeat the format string.
+func parseLocalTime(flagName, s string) (time.Time, error) {
+	t, err := time.ParseInLocation("2006-01-02 15:04", s, time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s: expected format \"YYYY-MM-DD HH:MM\", got %q", flagName, s)
+	}
+	return t, nil
+}
+
+// splitCSV splits a comma-separated list, trimming whitespace and dropping empty entries.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // parseDuration converts a human duration string ("1h", "30m", "7d") to time.Duration.
 // Supports Go duration formats plus "d" suffix for days.
 func parseDuration(s string) (time.Duration, error) {
